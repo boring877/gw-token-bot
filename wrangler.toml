@@ -1,0 +1,30 @@
+# Cloudflare Worker config for the GachaWiki $GW Discord presence bot.
+# This is a separate Workers + Durable Object project, decoupled from the
+# gacha-wiki Cloudflare Pages project (which has no DO bindings — no conflict).
+name = "gacha-wiki-bot"
+main = "src/index.ts"
+compatibility_date = "2024-09-23"
+
+# Single Durable Object that owns the persistent Discord gateway WebSocket.
+# Uses the WebSocket Hibernation API so it burns ~zero compute between
+# heartbeats (~41s) and stat updates (~60s) — fits the Workers free tier.
+[[durable_objects.bindings]]
+name = "GATEWAY"
+class_name = "GatewayDO"
+
+# SQLite-backed DO is the only storage backend allowed on the Workers free tier.
+# Each migration tag is one-time; add new tags if the DO class list ever changes.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["GatewayDO"]
+
+# 1-minute watchdog cron: if the gateway WebSocket ever drops and the DO
+# has hibernated with no active connection, this wakes it to re-bootstrap.
+[triggers]
+crons = ["* * * * *"]
+
+# Non-secret vars. BUYS_CHANNEL_ID targets the channel where buy/sell feed
+# messages go. Leave empty to disable the feed (presence still works).
+# Set it in .dev.vars for local dev (also gitignored).
+[vars]
+BUYS_CHANNEL_ID = ""

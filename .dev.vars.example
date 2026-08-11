@@ -1,0 +1,8 @@
+# Local dev secrets — copy this file to `.dev.vars` and fill in your bot token.
+# `.dev.vars` is gitignored. Never commit a real token.
+DISCORD_TOKEN=your-bot-token-here
+
+# Discord channel id where the buy/sell feed posts. Create the channel
+# (e.g. #gw-buys), enable Developer Mode in Discord settings, right-click
+# the channel -> Copy ID. Leave empty to disable the feed.
+BUYS_CHANNEL_ID=
