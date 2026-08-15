@@ -1,7 +1,7 @@
-# Generates the bot's custom animated GIFs (buy/sell/burn) into public/gifs/.
-# These are served by the Worker as static assets (see wrangler.toml [assets])
-# and attached to Discord embed images. Run from anywhere: python tools/make_gifs.py
-# Requires Pillow (pip install Pillow). Preview frames are dumped to %TEMP% for review.
+# Generates placeholder animated GIFs (buy/sell/burn style) into tools/previews/.
+# The LIVE embed images in public/gifs/ are user-provided (ffmpeg-converted
+# videos + one static PNG) — this script never touches them.
+# Run from anywhere: python tools/make_gifs.py. Requires Pillow.
 
 import math
 import random
@@ -13,7 +13,7 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 W, H = 480, 270
 FRAMES = 30
 FRAME_MS = 80
-OUT_DIR = Path(__file__).resolve().parent.parent / "public" / "gifs"
+OUT_DIR = Path(__file__).resolve().parent / "previews"
 FONT_PATH = "C:/Windows/Fonts/arialbd.ttf"  # Arial Bold — always present on Windows
 
 
@@ -188,6 +188,11 @@ def save_gif(frames: list[Image.Image], name: str) -> Path:
     frames[0].save(out, save_all=True, append_images=frames[1:], duration=FRAME_MS, loop=0, optimize=True)
     return out
 
+# ALL live embed images under public/gifs/ are user-provided (videos
+# converted via ffmpeg + one static PNG). This generator is kept only for
+# designing placeholders, so it writes to tools/previews/ — it can never
+# clobber the real assets.
+
 
 def dump_previews(name: str, frames: list[Image.Image]) -> None:
     tmp = Path(tempfile.gettempdir())
@@ -196,11 +201,9 @@ def dump_previews(name: str, frames: list[Image.Image]) -> None:
 
 
 if __name__ == "__main__":
-    # NOTE: sell.gif is NOT generated — it's a custom user-provided animation
-    # (converted from 쉐도우_바니_에레니르.mp4 via ffmpeg; see README/skill).
-    # Regenerating the others must never clobber it.
     for name, frames in (
         ("buy.gif", make_trade_gif("buy")),
+        ("sell.gif", make_trade_gif("sell")),
         ("burn.gif", make_burn_gif()),
     ):
         out = save_gif(frames, name)
