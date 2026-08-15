@@ -196,9 +196,11 @@ def dump_previews(name: str, frames: list[Image.Image]) -> None:
 
 
 if __name__ == "__main__":
+    # NOTE: sell.gif is NOT generated — it's a custom user-provided animation
+    # (converted from 쉐도우_바니_에레니르.mp4 via ffmpeg; see README/skill).
+    # Regenerating the others must never clobber it.
     for name, frames in (
         ("buy.gif", make_trade_gif("buy")),
-        ("sell.gif", make_trade_gif("sell")),
         ("burn.gif", make_burn_gif()),
     ):
         out = save_gif(frames, name)
