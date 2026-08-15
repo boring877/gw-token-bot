@@ -11,6 +11,7 @@ import {
   BURN_RECIPIENT_TOPICS,
 } from "./abi";
 import {
+  ASSET_BASE_URL,
   EXPLORER_URL,
   GW_ADDR,
   NFT_ADDR,
@@ -279,6 +280,13 @@ export async function pollMints(
 /** Mint embed color — purple, the classic NFT accent. */
 const COLOR_MINT = 0xa78bfa;
 
+/**
+ * Custom mint celebration GIF (user-provided video converted via ffmpeg),
+ * served by this worker as a static asset. The `?v` query busts Discord's
+ * image-proxy cache when the file is replaced.
+ */
+const MINT_GIF_URL = `${ASSET_BASE_URL}/gifs/mint.gif?v=1`;
+
 /** Token id as the collection displays it: #000, #042, #777… */
 function padId(id: number): string {
   return String(id).padStart(3, "0");
@@ -345,7 +353,10 @@ export function formatMintMessage(
     description: lines.join("\n"),
     url: `${EXPLORER_URL}/tx/${mint.txHash}`,
     color: COLOR_MINT,
-    image: { url: mint.imageUrl },
+    // Custom mint animation (user-provided video, converted to GIF) as the
+    // hero; the actual minted OG's art moves to the corner thumbnail.
+    image: { url: MINT_GIF_URL },
+    thumbnail: { url: mint.imageUrl },
     footer: { text: footer },
   };
   if (mint.timestamp) {

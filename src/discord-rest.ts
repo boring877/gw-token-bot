@@ -22,6 +22,7 @@ export interface DiscordEmbed {
   url?: string;
   color?: number; // RGB as a single int: (r<<16) | (g<<8) | b
   image?: { url: string };
+  thumbnail?: { url: string };
   footer?: { text: string };
   timestamp?: string; // ISO 8601
 }
