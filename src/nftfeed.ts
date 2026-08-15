@@ -281,11 +281,11 @@ export async function pollMints(
 const COLOR_MINT = 0xa78bfa;
 
 /**
- * Custom mint celebration GIF (user-provided video converted via ffmpeg),
- * served by this worker as a static asset. The `?v` query busts Discord's
- * image-proxy cache when the file is replaced.
+ * Custom mint image (user-provided emoji PNG), served by this worker as a
+ * static asset. The `?v` query busts Discord's image-proxy cache when the
+ * file is replaced.
  */
-const MINT_GIF_URL = `${ASSET_BASE_URL}/gifs/mint.gif?v=1`;
+const MINT_GIF_URL = `${ASSET_BASE_URL}/gifs/mint.png?v=2`;
 
 /** Token id as the collection displays it: #000, #042, #777… */
 function padId(id: number): string {

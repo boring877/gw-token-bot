@@ -181,11 +181,11 @@ const COLOR_SELL = 0xff5252; // red
 
 /**
  * Custom embed images served by THIS worker as static assets — all
- * user-provided (buy is a static emoji PNG; sell is a video-converted GIF).
- * The ?v query busts Discord's image-proxy cache when a file is replaced.
+ * user-provided emoji PNGs from the BD2 goodie pack. The ?v query busts
+ * Discord's image-proxy cache when a file is replaced.
  */
 const BUY_GIF_URL = `${ASSET_BASE_URL}/gifs/buy.png?v=2`;
-const SELL_GIF_URL = `${ASSET_BASE_URL}/gifs/sell.gif?v=2`;
+const SELL_GIF_URL = `${ASSET_BASE_URL}/gifs/sell.png?v=3`;
 
 /** Format an ETH amount with up to 6 decimals. */
 export function fmtEth(n: number): string {

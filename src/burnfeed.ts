@@ -104,8 +104,8 @@ export async function pollBurns(
 /** Burn embed color — orange. */
 const COLOR_BURN = 0xff6d00;
 
-/** Our self-hosted burn GIF (user-provided video, converted via ffmpeg). */
-const BURN_GIF_URL = `${ASSET_BASE_URL}/gifs/burn.gif?v=2`;
+/** Our self-hosted burn image (user-provided emoji PNG). */
+const BURN_GIF_URL = `${ASSET_BASE_URL}/gifs/burn.png?v=3`;
 
 /** Format a burn USD value sensibly across magnitudes (dust → large). */
 function fmtBurnUsd(usd: number): string {
