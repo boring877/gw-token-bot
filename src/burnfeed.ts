@@ -72,15 +72,15 @@ export async function pollBurns(
   const window = logWindow(lastBlock, latest);
   if (!window) return { burns: [], latestBlock: latest };
 
-  const logs = await fetchLogs({
+  const { logs, scannedTo } = await fetchLogs({
     address: GW_ADDR,
     topics: [TRANSFER_TOPIC0, null, BURN_RECIPIENT_TOPICS],
     from: window.from,
     to: window.to,
-  });
+  }, "burn");
 
   if (!Array.isArray(logs) || logs.length === 0) {
-    return { burns: [], latestBlock: window.to };
+    return { burns: [], latestBlock: scannedTo };
   }
 
   const tsFor = await resolveTimestamps(logs);
@@ -98,7 +98,7 @@ export async function pollBurns(
       : a.logIndex - b.logIndex,
   );
 
-  return { burns, latestBlock: window.to };
+  return { burns, latestBlock: scannedTo };
 }
 
 /** Burn embed color — orange. */

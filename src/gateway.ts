@@ -29,6 +29,7 @@ import {
 } from "./swapfeed";
 import { formatBurnMessage, pollBurns } from "./burnfeed";
 import { ogBalanceOf, fetchTotalSupply, formatMintMessage, pollMints } from "./nftfeed";
+import { resetLogChunkBudget, setGeneralRpcUrl } from "./evm";
 import { postChannelMessage } from "./discord-rest";
 import {
   codeKey,
@@ -152,6 +153,8 @@ interface GatewayEnv {
   GUILD_ID?: string;
   /** OG Holder role id for verification. */
   OG_ROLE_ID?: string;
+  /** Alchemy endpoint for general RPC calls (secret). */
+  ALCHEMY_URL?: string;
 }
 
 export class GatewayDO implements DurableObject {
@@ -265,6 +268,14 @@ export class GatewayDO implements DurableObject {
       if (burn > 0) this.mem.burnLastBlock = burn;
       if (mint > 0) this.mem.mintLastBlock = mint;
       await this.persist();
+      // ?restart=1: drop the WebSocket + alarm so the DO evicts and the next
+      // cron wake (≤60s) brings it back on CURRENT code — deploys alone don't
+      // restart a live DO.
+      if (q.get("restart") === "1") {
+        this.detachSocket();
+        await this.state.storage.deleteAlarm();
+        return Response.json({ restarting: true });
+      }
       return Response.json({
         lastBlock: this.mem.lastBlock,
         burnLastBlock: this.mem.burnLastBlock,
@@ -343,6 +354,9 @@ export class GatewayDO implements DurableObject {
     channelId: string,
     due: { swaps: boolean; burns: boolean; mints: boolean },
   ): Promise<void> {
+    // One chunk budget per tick — the Workers free tier caps an invocation
+    // at ~50 subrequests total.
+    resetLogChunkBudget();
     try {
       // Refresh ETH price if older than the TTL.
       if (
@@ -774,6 +788,7 @@ export class GatewayDO implements DurableObject {
 
   private async hydrate(): Promise<void> {
     if (this.hydrated) return;
+    setGeneralRpcUrl(this.env.ALCHEMY_URL);
     const stored =
       (await this.state.storage.get<GatewayState>("state")) ?? FRESH_STATE;
     this.mem = { ...FRESH_STATE, ...stored };

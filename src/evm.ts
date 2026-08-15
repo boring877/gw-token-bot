@@ -1,11 +1,12 @@
-// Shared Robinhood Chain data access for the on-chain feeds. TWO sources with
-// automatic failover, because both free endpoints rate-limit (learned the hard
-// way — the public RPC 429s under sustained polling, and Blockscout's REST API
-// 429s on bursts):
-//   1. Blockscout's logs API — dedicated indexer, no key, returns per-log
-//      timestamps; used FIRST for eth_getLogs-style queries.
-//   2. The public JSON-RPC — used for receipts/eth_call, and as the fallback
-//      when Blockscout is limiting us.
+// Shared Robinhood Chain data access for the on-chain feeds. THREE sources,
+// split by call type, because every free endpoint has a different weakness
+// (all learned the hard way on 2026-08-15):
+//   - eth_getLogs MUST go to the public RPC (or Blockscout) — Alchemy's free
+//     tier caps getLogs at a 10-block range, useless for our windows.
+//   - Everything else (blockNumber, eth_call, receipts, block lookups) goes
+//     to Alchemy when the ALCHEMY_URL secret is set — generous free tier.
+//   - Blockscout's REST logs API is the last-resort fallback for logs when
+//     the public RPC 429s (it 429s Cloudflare workers a lot, but retries).
 
 import {
   EXPLORER_URL,
@@ -16,6 +17,17 @@ import {
 
 /** Blockscout's classic REST API base (the explorer we link to in embeds). */
 const EXPLORER_API = `${EXPLORER_URL}/api`;
+
+/**
+ * Active URL for general JSON-RPC calls. Defaults to the public RPC; the
+ * worker/DO set it to the ALCHEMY_URL secret at entry when configured.
+ */
+let generalRpcUrl = RH_RPC;
+
+/** Point general RPC calls at Alchemy (no-op for falsy values). */
+export function setGeneralRpcUrl(url: string | undefined | null): void {
+  if (url && /^https:\/\/.+/.test(url)) generalRpcUrl = url;
+}
 
 /** Minimal EVM log shape we read from log queries. */
 export interface EvmLog {
@@ -29,12 +41,12 @@ export interface EvmLog {
   timeStamp?: string;
 }
 
-/** Make a JSON-RPC request to the Robinhood RPC. */
+/** Make a JSON-RPC request (to Alchemy when configured, else the public RPC). */
 export async function rpc(
   method: string,
   params: unknown[],
 ): Promise<unknown> {
-  const res = await fetch(RH_RPC, {
+  const res = await fetch(generalRpcUrl, {
     method: "POST",
     headers: { "content-type": "application/json" },
     signal: AbortSignal.timeout(8_000),
@@ -73,110 +85,238 @@ export function toHuman(raw: bigint): number {
 }
 
 /** Current chain head. ONE call per feed tick, shared by all three feeds.
- * Tries Blockscout first, falls back to the public RPC. */
+ * RPC first (Alchemy when configured), Blockscout as fallback. */
 export async function fetchLatestBlock(): Promise<number> {
   try {
-    const res = await fetch(
-      `${EXPLORER_API}?module=block&action=eth_block_number`,
-      { signal: AbortSignal.timeout(8_000) },
-    );
-    if (res.ok) {
-      const json = (await res.json()) as { result?: string };
-      if (json.result && json.result.startsWith("0x")) {
-        return parseInt(json.result, 16);
-      }
-      throw new Error(`blockscout block_number: ${JSON.stringify(json).slice(0, 120)}`);
-    }
-    throw new Error(`blockscout http ${res.status}`);
+    const latestHex = (await rpc("eth_blockNumber", [])) as string;
+    return parseInt(latestHex, 16);
   } catch (err) {
-    console.warn("[chain] blockscout head failed:", err);
+    console.warn("[chain] rpc head fetch failed:", err);
   }
-  const latestHex = (await rpc("eth_blockNumber", [])) as string;
-  return parseInt(latestHex, 16);
+  const res = await fetch(
+    `${EXPLORER_API}?module=block&action=eth_block_number`,
+    { signal: AbortSignal.timeout(8_000) },
+  );
+  if (!res.ok) throw new Error(`blockscout http ${res.status}`);
+  const json = (await res.json()) as { result?: string };
+  if (!json.result || !json.result.startsWith("0x")) {
+    throw new Error(`blockscout block_number: ${JSON.stringify(json).slice(0, 120)}`);
+  }
+  return parseInt(json.result, 16);
 }
 
 /**
  * Fetch logs for an RPC-style filter ({address, topics, from, to}), where a
  * topic slot may be null (wildcard) or an array of alternatives (OR).
- * Blockscout first (it has no OR-within-a-topic, so array slots fan out into
- * parallel requests), public-RPC eth_getLogs as fallback. Throws only when
- * BOTH sources fail — the gateway's 429 backoff handles that.
+ * Public-RPC eth_getLogs first (no range cap; Alchemy free caps getLogs at
+ * 10 blocks so it is deliberately NOT used here), Blockscout's logs API as
+ * fallback (no OR-within-a-topic there, so array slots fan out into parallel
+ * requests). Throws only when BOTH sources fail — the gateway's 429 backoff
+ * handles that.
  */
-export async function fetchLogs(filter: {
-  address: string;
-  topics: unknown[];
-  from: number;
-  to: number;
-}): Promise<EvmLog[]> {
+export async function fetchLogs(
+  filter: {
+    address: string;
+    topics: unknown[];
+    from: number;
+    to: number;
+  },
+  lane: LogLane,
+): Promise<LogsResult> {
   try {
-    // Expand OR-array topic slots into concrete per-request values.
-    const slots: string[][] = [0, 1, 2, 3].map((i) => {
-      const t = filter.topics[i];
-      if (t == null) return [null as unknown as string];
-      return Array.isArray(t) ? (t as string[]) : [t as string];
-    });
-    const combos: Array<Array<string | null>> = [[]];
-    for (const vals of slots) {
-      // Wildcard slots multiply nothing (single null); OR slots multiply out.
-      const next: Array<Array<string | null>> = [];
-      for (const base of combos) {
-        for (const v of vals) next.push([...base, v]);
-      }
-      if (next.length > 8) break; // sanity cap
-      combos.length = 0;
-      combos.push(...next);
-    }
-
-    const responses = await Promise.all(
-      combos.map(async (combo) => {
-        const q = new URLSearchParams({
-          module: "logs",
-          action: "getLogs",
-          address: filter.address,
-          fromBlock: String(filter.from),
-          toBlock: String(filter.to),
-        });
-        if (combo[0]) {
-          q.set("topic0", combo[0]);
-          if (combo[1]) q.set("topic0_1_opr", "and");
-          if (combo[2]) q.set("topic0_2_opr", "and");
-        }
-        if (combo[1]) q.set("topic1", combo[1]);
-        if (combo[2]) q.set("topic2", combo[2]);
-        if (combo[3]) q.set("topic3", combo[3]);
-        const res = await fetch(`${EXPLORER_API}?${q.toString()}`, {
-          signal: AbortSignal.timeout(8_000),
-        });
-        if (!res.ok) throw new Error(`blockscout http ${res.status}`);
-        const json = (await res.json()) as {
-          status?: string;
-          message?: string;
-          result?: unknown;
-        };
-        // status 0 + "No logs found" is a legitimate empty result.
-        if (json.status === "0" && json.message !== "No logs found") {
-          throw new Error(`blockscout: ${json.message ?? "unknown"}`);
-        }
-        return Array.isArray(json.result) ? (json.result as EvmLog[]) : [];
-      }),
-    );
-    return responses.flat();
+    const logs = (await rpcLogs("eth_getLogs", [
+      {
+        address: filter.address,
+        topics: filter.topics,
+        fromBlock: "0x" + filter.from.toString(16),
+        toBlock: "0x" + filter.to.toString(16),
+      },
+    ])) as EvmLog[];
+    return { logs, scannedTo: filter.to };
   } catch (err) {
-    // Blockscout failed/limited — log the reason, fall back to the public RPC.
     console.warn(
-      `[chain] blockscout logs failed (${filter.address.slice(0, 10)}…):`,
+      `[chain] rpc logs failed (${filter.address.slice(0, 10)}…):`,
       err,
     );
   }
 
-  return (await rpc("eth_getLogs", [
-    {
-      address: filter.address,
-      topics: filter.topics,
-      fromBlock: "0x" + filter.from.toString(16),
-      toBlock: "0x" + filter.to.toString(16),
-    },
-  ])) as EvmLog[];
+  // Fallback: Alchemy in 10-block chunks (its free tier caps getLogs range
+  // at 10 blocks per request). Lane-budget-limited partial scans are fine —
+  // scannedTo keeps cursors honest — so failures here mean Alchemy erred.
+  try {
+    return await fetchLogsChunked(filter, lane);
+  } catch (err) {
+    console.warn(
+      `[chain] alchemy chunked logs failed (${filter.address.slice(0, 10)}…):`,
+      err,
+    );
+  }
+
+  // Expand OR-array topic slots into concrete per-request values.
+  const slots: string[][] = [0, 1, 2, 3].map((i) => {
+    const t = filter.topics[i];
+    if (t == null) return [null as unknown as string];
+    return Array.isArray(t) ? (t as string[]) : [t as string];
+  });
+  const combos: Array<Array<string | null>> = [[]];
+  for (const vals of slots) {
+    // Wildcard slots multiply nothing (single null); OR slots multiply out.
+    const next: Array<Array<string | null>> = [];
+    for (const base of combos) {
+      for (const v of vals) next.push([...base, v]);
+    }
+    if (next.length > 8) break; // sanity cap
+    combos.length = 0;
+    combos.push(...next);
+  }
+
+  const responses = await Promise.all(
+    combos.map(async (combo) => {
+      const q = new URLSearchParams({
+        module: "logs",
+        action: "getLogs",
+        address: filter.address,
+        fromBlock: String(filter.from),
+        toBlock: String(filter.to),
+      });
+      if (combo[0]) {
+        q.set("topic0", combo[0]);
+        if (combo[1]) q.set("topic0_1_opr", "and");
+        if (combo[2]) q.set("topic0_2_opr", "and");
+      }
+      if (combo[1]) q.set("topic1", combo[1]);
+      if (combo[2]) q.set("topic2", combo[2]);
+      if (combo[3]) q.set("topic3", combo[3]);
+      const res = await fetch(`${EXPLORER_API}?${q.toString()}`, {
+        signal: AbortSignal.timeout(8_000),
+      });
+      if (!res.ok) throw new Error(`blockscout http ${res.status}`);
+      const json = (await res.json()) as {
+        status?: string;
+        message?: string;
+        result?: unknown;
+      };
+      // status 0 + "No logs found" is a legitimate empty result.
+      if (json.status === "0" && json.message !== "No logs found") {
+        throw new Error(`blockscout: ${json.message ?? "unknown"}`);
+      }
+      return Array.isArray(json.result) ? (json.result as EvmLog[]) : [];
+    }),
+  );
+  return { logs: responses.flat(), scannedTo: filter.to };
+}
+
+/**
+ * JSON-RPC call that ALWAYS targets the public RPC — for eth_getLogs, whose
+ * free-tier Alchemy range cap (10 blocks) makes Alchemy unusable for logs.
+ */
+async function rpcLogs(method: string, params: unknown[]): Promise<unknown> {
+  const res = await fetch(RH_RPC, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    signal: AbortSignal.timeout(8_000),
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+  });
+  if (!res.ok) throw new Error(`rpc http ${res.status}`);
+  const json = (await res.json()) as { result?: unknown; error?: unknown };
+  if (json.error) throw new Error(`rpc error: ${JSON.stringify(json.error)}`);
+  return json.result;
+}
+
+/** Alchemy free-tier getLogs range cap (blocks per request). */
+const ALCHEMY_LOG_CHUNK = 10;
+
+/** Max chunks per fetchLogs — must cover SWAP_POLL_BLOCK_RANGE fully. */
+const MAX_LOG_CHUNKS = 100;
+
+/** Result of a log fetch: the logs plus the highest block FULLY scanned. */
+export interface LogsResult {
+  logs: EvmLog[];
+  /**
+   * Callers advance their cursor here, NOT to their window end — when the
+   * chunked fallback is budget-limited it scans fewer blocks than asked, and
+   * advancing past unscanned blocks would silently skip events.
+   */
+  scannedTo: number;
+}
+
+/**
+ * Per-tick chunk budgets per feed lane. The Workers free tier caps ONE
+ * invocation at ~50 subrequests total (heads, Discord posts, presence all
+ * count), so chunked scanning gets a fixed share, reset each feed tick.
+ * Sized against the real chain rate (~12 blocks/s): swaps get enough chunks
+ * to keep pace even when fully chunked; burns/mints self-pace through their
+ * backlogs during public-RPC flaps and clear fast once it serves full
+ * windows again — slower, but never lossy. Combined worst tick stays under
+ * the ~50-subrequest invocation cap.
+ */
+const chunkBudgets: Record<string, number> = { swap: 22, burn: 9, mint: 9 };
+
+/** Which feed a log fetch belongs to (chunk-budget lane). */
+export type LogLane = "swap" | "burn" | "mint";
+
+/** Reset the per-tick chunk budgets (called at the start of each feed tick). */
+export function resetLogChunkBudget(): void {
+  chunkBudgets.swap = 22;
+  chunkBudgets.burn = 9;
+  chunkBudgets.mint = 9;
+}
+
+/**
+ * Serve a log filter from the general RPC (Alchemy) in 10-block chunks,
+ * batched to stay gentle on per-second throughput. May scan FEWER blocks
+ * than the window (lane budget) — the returned scannedTo tells the caller
+ * how far it got; the rest is picked up on later ticks. A fully-exhausted
+ * lane returns a clean no-op (scannedTo = nothing new), NOT an error.
+ */
+async function fetchLogsChunked(
+  filter: {
+    address: string;
+    topics: unknown[];
+    from: number;
+    to: number;
+  },
+  lane: LogLane,
+): Promise<LogsResult> {
+  const total = filter.to - filter.from + 1;
+  const nChunks = Math.ceil(total / ALCHEMY_LOG_CHUNK);
+  if (nChunks > MAX_LOG_CHUNKS) {
+    throw new Error(`window ${total} blocks exceeds chunk budget`);
+  }
+  const usable = Math.min(nChunks, chunkBudgets[lane] ?? 0);
+  if (usable <= 0) {
+    // No budget this tick — clean no-op, no cursor movement.
+    return { logs: [], scannedTo: filter.from - 1 };
+  }
+  chunkBudgets[lane] = (chunkBudgets[lane] ?? 0) - usable;
+
+  const out: EvmLog[] = [];
+  const BATCH = 8;
+  for (let i = 0; i < usable; i += BATCH) {
+    const batch = [...Array(Math.min(BATCH, usable - i)).keys()].map(
+      async (j) => {
+        const idx = i + j;
+        const from = filter.from + idx * ALCHEMY_LOG_CHUNK;
+        const to = Math.min(from + ALCHEMY_LOG_CHUNK - 1, filter.to);
+        return (await rpc("eth_getLogs", [
+          {
+            address: filter.address,
+            topics: filter.topics,
+            fromBlock: "0x" + from.toString(16),
+            toBlock: "0x" + to.toString(16),
+          },
+        ])) as EvmLog[];
+      },
+    );
+    out.push(...(await Promise.all(batch)).flat());
+  }
+  return {
+    logs: out,
+    scannedTo: Math.min(
+      filter.from + usable * ALCHEMY_LOG_CHUNK - 1,
+      filter.to,
+    ),
+  };
 }
 
 /**

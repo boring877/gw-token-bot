@@ -6,6 +6,7 @@
 
 import { GatewayDO } from "./gateway";
 import { RH_RPC } from "./config";
+import { setGeneralRpcUrl } from "./evm";
 import {
   doStore,
   handleVerifyInteraction,
@@ -24,6 +25,8 @@ interface Env {
   GUILD_ID: string;
   /** The OG Holder role id (created via Discord REST). */
   OG_ROLE_ID: string;
+  /** Alchemy endpoint for general RPC calls (secret; free tier 10-block getLogs cap means logs stay on the public RPC). */
+  ALCHEMY_URL?: string;
 }
 
 /** Stable id for the singleton DO instance. */
@@ -112,6 +115,7 @@ function corsHeaders(request: Request): Record<string, string> {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    setGeneralRpcUrl(env.ALCHEMY_URL);
     const url = new URL(request.url);
 
     // Discord slash-command interactions.
@@ -160,8 +164,8 @@ export default {
       });
     }
 
-    // Chain-source health probe: calls eth_blockNumber with and without a
-    // custom User-Agent to see how the public RPC treats worker traffic.
+    // Chain-source health probe: general RPC (Alchemy when configured) and
+    // the public RPC used for eth_getLogs.
     if (url.pathname === "/rpc-health") {
       const body = JSON.stringify({
         jsonrpc: "2.0",
@@ -169,24 +173,23 @@ export default {
         method: "eth_blockNumber",
         params: [],
       });
-      const probe = async (ua?: string) => {
+      const probe = async (target: string, label: string) => {
         try {
-          const res = await fetch(RH_RPC, {
+          const res = await fetch(target, {
             method: "POST",
-            headers: ua
-              ? { "content-type": "application/json", "user-agent": ua }
-              : { "content-type": "application/json" },
+            headers: { "content-type": "application/json" },
             body,
             signal: AbortSignal.timeout(8_000),
           });
-          return res.status;
+          return { label, status: res.status };
         } catch {
-          return 0;
+          return { label, status: 0 };
         }
       };
+      const general = env.ALCHEMY_URL ?? RH_RPC;
       return Response.json({
-        defaultUa: await probe(),
-        customUa: await probe("Mozilla/5.0 (gacha-wiki-bot)"),
+        general: await probe(general, general.includes("g.alchemy.com") ? "alchemy" : "public"),
+        logsRpc: await probe(RH_RPC, "public"),
       });
     }
 

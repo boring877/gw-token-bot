@@ -206,15 +206,15 @@ export async function pollMints(
     return { mints: [], transfers: [], latestBlock: latest };
   }
 
-  const logs = await fetchLogs({
+  const { logs, scannedTo } = await fetchLogs({
     address: NFT_ADDR,
     topics: [TRANSFER_TOPIC0],
     from: window.from,
     to: window.to,
-  });
+  }, "mint");
 
   if (!Array.isArray(logs) || logs.length === 0) {
-    return { mints: [], transfers: [], latestBlock: window.to };
+    return { mints: [], transfers: [], latestBlock: scannedTo };
   }
 
   const tsFor = await resolveTimestamps(logs);
@@ -269,7 +269,7 @@ export async function pollMints(
   // Oldest-first so they post in chronological order.
   mints.sort((a, b) => a.blockNumber - b.blockNumber);
 
-  return { mints, transfers, latestBlock: window.to };
+  return { mints, transfers, latestBlock: scannedTo };
 }
 
 // --------------------------------------------------------------------------

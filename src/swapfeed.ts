@@ -142,15 +142,15 @@ export async function pollSwaps(
     return { swaps: [], latestBlock: latest };
   }
 
-  const logs = await fetchLogs({
+  const { logs, scannedTo } = await fetchLogs({
     address: POOL_ADDR,
     topics: [SWAP_TOPIC0],
     from: window.from,
     to: window.to,
-  });
+  }, "swap");
 
   if (!Array.isArray(logs) || logs.length === 0) {
-    return { swaps: [], latestBlock: window.to };
+    return { swaps: [], latestBlock: scannedTo };
   }
 
   const tsFor = await resolveTimestamps(logs);
@@ -168,7 +168,7 @@ export async function pollSwaps(
       : a.logIndex - b.logIndex,
   );
 
-  return { swaps, latestBlock: window.to };
+  return { swaps, latestBlock: scannedTo };
 }
 
 // --------------------------------------------------------------------------

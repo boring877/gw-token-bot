@@ -116,18 +116,20 @@ export const TOKEN_DECIMALS = 18;
 export const SWAP_POLL_INTERVAL_MS = 10_000;
 
 /**
- * Burn + OG-mint poll cadence. These events are rare (single digits ever) so
- * they don't need swap-level latency — a slower cadence keeps the total RPC
- * call rate near the swap feed's proven ~12 calls/min budget.
+ * Burn + OG-mint poll cadence. Rare events, but the cadence is sized for the
+ * Alchemy-chunked fallback: 30s ≈ 120 new blocks ≈ 12 chunks = exactly the
+ * per-lane chunk budget, so burn/mint keep pace with the chain even when the
+ * public RPC (primary for getLogs) is rate-limiting us.
  */
-export const BURN_MINT_POLL_INTERVAL_MS = 60_000;
+export const BURN_MINT_POLL_INTERVAL_MS = 30_000;
 
 /**
- * Maximum block range per eth_getLogs call. Some RPCs cap this (often 10000);
- * keep below the cap. Robinhood L2 block time is ~0.3s so 5000 blocks ≈ 25min
- * of headroom if a poll is ever delayed.
+ * Maximum block range per feed poll window. Two constraints: some RPCs cap
+ * getLogs ranges, and the Alchemy-chunked fallback scans 10 blocks per
+ * request with a 100-chunk budget — so this must stay ≤ 1000. Robinhood L2
+ * block time is ~0.25-0.3s, so 600 blocks ≈ 2.5-3 min of catch-up per poll.
  */
-export const SWAP_POLL_BLOCK_RANGE = 5_000;
+export const SWAP_POLL_BLOCK_RANGE = 600;
 
 /**
  * If a single poll returns more than this many swaps, batch them into one
