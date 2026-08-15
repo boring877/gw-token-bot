@@ -251,6 +251,27 @@ export class GatewayDO implements DurableObject {
       return new Response(null, { status: 405 });
     }
 
+    // ---- admin: set feed cursors (token-guarded at the Worker) ----
+    if (path === "/do/seed" && request.method === "POST") {
+      const q = url.searchParams;
+      const swap = parseInt(q.get("swap") ?? "", 10);
+      const burn = parseInt(q.get("burn") ?? "", 10);
+      const mint = parseInt(q.get("mint") ?? "", 10);
+      // Explicit set both ways — the admin (see below) is responsible for
+      // not skipping unposted blocks. Used to resume after outages: set each
+      // cursor to the block of the LAST event that feed successfully posted,
+      // so the next poll scans strictly unposted territory.
+      if (swap > 0) this.mem.lastBlock = swap;
+      if (burn > 0) this.mem.burnLastBlock = burn;
+      if (mint > 0) this.mem.mintLastBlock = mint;
+      await this.persist();
+      return Response.json({
+        lastBlock: this.mem.lastBlock,
+        burnLastBlock: this.mem.burnLastBlock,
+        mintLastBlock: this.mem.mintLastBlock,
+      });
+    }
+
     // ---- default: bootstrap the gateway connection ----
     await this.ensureConnected();
     return new Response("ok\n", {

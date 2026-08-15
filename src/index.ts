@@ -5,6 +5,7 @@
 // Re-exports the DO class so Wrangler can bind it.
 
 import { GatewayDO } from "./gateway";
+import { RH_RPC } from "./config";
 import {
   doStore,
   handleVerifyInteraction,
@@ -157,6 +158,46 @@ export default {
         status: outcome.status,
         headers: corsHeaders(request),
       });
+    }
+
+    // Chain-source health probe: calls eth_blockNumber with and without a
+    // custom User-Agent to see how the public RPC treats worker traffic.
+    if (url.pathname === "/rpc-health") {
+      const body = JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "eth_blockNumber",
+        params: [],
+      });
+      const probe = async (ua?: string) => {
+        try {
+          const res = await fetch(RH_RPC, {
+            method: "POST",
+            headers: ua
+              ? { "content-type": "application/json", "user-agent": ua }
+              : { "content-type": "application/json" },
+            body,
+            signal: AbortSignal.timeout(8_000),
+          });
+          return res.status;
+        } catch {
+          return 0;
+        }
+      };
+      return Response.json({
+        defaultUa: await probe(),
+        customUa: await probe("Mozilla/5.0 (gacha-wiki-bot)"),
+      });
+    }
+
+    // Token-guarded admin: rewind feed cursors so the feeds replay missed
+    // blocks through their normal path (used after an outage backfill).
+    if (url.pathname === "/do/seed" && request.method === "POST") {
+      if (request.headers.get("x-admin-token") !== env.DISCORD_TOKEN) {
+        return new Response("forbidden", { status: 403 });
+      }
+      // Forward as POST — stub.fetch(string) would otherwise default to GET.
+      return getGatewayStub(env).fetch(request.url, { method: "POST" });
     }
 
     // Default: bootstrap the DO's gateway connection (curl / works).
