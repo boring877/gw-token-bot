@@ -1,8 +1,15 @@
-// Worker entry point — routes incoming fetch() and scheduled() events to the
-// singleton GatewayDO, which owns the persistent Discord gateway WebSocket.
+// Worker entry point — routes incoming fetch() and scheduled() events.
+//   GET  /               -> bootstrap the gateway DO (returns "ok")
+//   POST /interactions   -> Discord slash commands (/verify, /check), Ed25519-verified
+//   POST /verifylink     -> the wiki's verify page submits {code, address, signature}
 // Re-exports the DO class so Wrangler can bind it.
 
 import { GatewayDO } from "./gateway";
+import {
+  doStore,
+  handleVerifyInteraction,
+  handleVerifyLink,
+} from "./verify";
 
 export { GatewayDO };
 
@@ -10,8 +17,12 @@ export { GatewayDO };
 interface Env {
   GATEWAY: DurableObjectNamespace;
   DISCORD_TOKEN: string;
-  /** Discord channel id for the buys/sells feed. Optional — empty = disabled. */
+  /** Discord channel id for the buys/sells/burns feed. Optional — empty = disabled. */
   BUYS_CHANNEL_ID?: string;
+  /** Guild whose members get the OG Holder role. */
+  GUILD_ID: string;
+  /** The OG Holder role id (created via Discord REST). */
+  OG_ROLE_ID: string;
 }
 
 /** Stable id for the singleton DO instance. */
@@ -22,15 +33,134 @@ function getGatewayStub(env: Env): DurableObjectStub {
   return env.GATEWAY.get(id);
 }
 
-/**
- * GET /  -> ensures the DO has an open gateway connection and returns "ok".
- * Any HTTP method works; a simple `curl` is enough to bootstrap the bot.
- */
+// ---------------------------------------------------------------------------
+// Ed25519 interaction-signature verification (Discord requirement)
+// ---------------------------------------------------------------------------
+
+/** Cached Ed25519 public key of our Discord application (per isolate). */
+let cachedVerifyKey: CryptoKey | null = null;
+
+/** Fetch the application's verify key via the bot token and import it. */
+async function getVerifyKey(token: string): Promise<CryptoKey> {
+  if (cachedVerifyKey) return cachedVerifyKey;
+  const res = await fetch("https://discord.com/api/v10/oauth2/applications/@me", {
+    headers: { Authorization: `Bot ${token}` },
+  });
+  if (!res.ok) throw new Error(`app fetch ${res.status}`);
+  const app = (await res.json()) as { verify_key?: string };
+  if (!app.verify_key) throw new Error("no verify_key");
+  cachedVerifyKey = await crypto.subtle.importKey(
+    "raw",
+    hexToBytes(app.verify_key),
+    { name: "Ed25519" },
+    false,
+    ["verify"],
+  );
+  return cachedVerifyKey;
+}
+
+function hexToBytes(hex: string): Uint8Array {
+  const clean = hex.startsWith("0x") ? hex.slice(2) : hex;
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}
+
+/** True when the request carries a valid Discord Ed25519 signature. */
+async function interactionIsAuthentic(
+  request: Request,
+  body: string,
+  token: string,
+): Promise<boolean> {
+  const sig = request.headers.get("x-signature-ed25519");
+  const ts = request.headers.get("x-signature-timestamp");
+  if (!sig || !ts) return false;
+  const key = await getVerifyKey(token);
+  const data = new TextEncoder().encode(ts + body);
+  return crypto.subtle.verify("Ed25519", key, hexToBytes(sig), data);
+}
+
+// ---------------------------------------------------------------------------
+// CORS for the wiki's verify page
+// ---------------------------------------------------------------------------
+
+/** Allowed browser origins for /verifylink (site + local dev). */
+const VERIFY_ALLOWED_ORIGINS = new Set([
+  "https://gachawiki.net",
+  "http://localhost:4321",
+  "http://127.0.0.1:4321",
+]);
+
+function corsHeaders(request: Request): Record<string, string> {
+  const origin = request.headers.get("origin") ?? "";
+  return {
+    ...(VERIFY_ALLOWED_ORIGINS.has(origin)
+      ? { "access-control-allow-origin": origin }
+      : {}),
+    "access-control-allow-methods": "POST, OPTIONS",
+    "access-control-allow-headers": "content-type",
+    "access-control-max-age": "86400",
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Router
+// ---------------------------------------------------------------------------
+
 export default {
-  async fetch(_request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const url = new URL(request.url);
+
+    // Discord slash-command interactions.
+    if (url.pathname === "/interactions" && request.method === "POST") {
+      const body = await request.text();
+      let authentic = false;
+      try {
+        authentic = await interactionIsAuthentic(request, body, env.DISCORD_TOKEN);
+      } catch (err) {
+        console.error("[interactions] verify key fetch failed:", err);
+      }
+      if (!authentic) {
+        return new Response("invalid request signature", { status: 401 });
+      }
+      const interaction = JSON.parse(body) as Parameters<
+        typeof handleVerifyInteraction
+      >[2];
+      const store = doStore(getGatewayStub(env));
+      const reply = await handleVerifyInteraction(env, store, interaction);
+      return Response.json(reply);
+    }
+
+    // The wiki's verify page submits signed codes here.
+    if (url.pathname === "/verifylink" && request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: corsHeaders(request) });
+    }
+    if (url.pathname === "/verifylink" && request.method === "POST") {
+      let body: { code?: unknown; address?: unknown; signature?: unknown };
+      try {
+        body = (await request.json()) as typeof body;
+      } catch {
+        return Response.json({ ok: false, error: "bad_json" }, { status: 400 });
+      }
+      const outcome = await handleVerifyLink(
+        {
+          DISCORD_TOKEN: env.DISCORD_TOKEN,
+          GUILD_ID: env.GUILD_ID,
+          OG_ROLE_ID: env.OG_ROLE_ID,
+          getStub: () => getGatewayStub(env),
+        },
+        body,
+      );
+      return Response.json(outcome.json, {
+        status: outcome.status,
+        headers: corsHeaders(request),
+      });
+    }
+
+    // Default: bootstrap the DO's gateway connection (curl / works).
     const stub = getGatewayStub(env);
-    // Bootstrap the DO's gateway connection. The DO is a singleton; repeated
-    // calls are a cheap no-op once the WebSocket is open.
     return stub.fetch("https://do/bootstrap");
   },
 

@@ -66,10 +66,27 @@ export interface DecodedMint {
   timestamp: number;
 }
 
+/** A non-mint OG Transfer (sale, gift, wallet move, or OG burn). */
+export interface OgTransfer {
+  /** Block number the transfer occurred in. */
+  blockNumber: number;
+  /** Transaction hash. */
+  txHash: string;
+  /** Sender (topic1) — the wallet whose holder role may need revoking. */
+  from: string;
+  /** Recipient (topic2). */
+  to: string;
+  /** Token id (topic3). */
+  tokenId: number;
+}
+
 /** Result of one mint poll. */
 export interface MintPollResult {
   /** New mints (one entry per tx), oldest-first. */
   mints: DecodedMint[];
+  /** Non-mint transfers, oldest-first — checked against linked wallets for
+   *  auto-revoke (a holder who moved their OGs away loses the role). */
+  transfers: OgTransfer[];
   /** New highest block to persist as the mint cursor. */
   latestBlock: number;
 }
@@ -82,6 +99,23 @@ export async function fetchTotalSupply(): Promise<number | null> {
       "latest",
     ])) as string;
     return parseInt(hex, 16);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * balanceOf(address) on the OG contract. Null on RPC failure (caller decides
+ * how to degrade). Used by holder verification.
+ */
+export async function ogBalanceOf(address: string): Promise<bigint | null> {
+  try {
+    const padded = address.toLowerCase().replace(/^0x/, "").padStart(64, "0");
+    const hex = (await rpc("eth_call", [
+      { to: NFT_ADDR, data: "0x70a08231" + padded }, // balanceOf(address)
+      "latest",
+    ])) as string;
+    return BigInt(hex);
   } catch {
     return null;
   }
@@ -158,36 +192,52 @@ async function detectPayment(
 }
 
 /**
- * Poll for new OG mints since `lastBlock`. `latest` is the already-fetched
- * chain head (shared across feeds). Returns per-tx mint groups + the new
- * cursor. Throws on RPC failure — caller decides whether to retry.
+ * Poll for new OG Transfers since `lastBlock` (ALL of them — mints from the
+ * zero address, plus wallet-to-wallet moves we check for role auto-revoke).
+ * `latest` is the already-fetched chain head (shared across feeds). Returns
+ * per-tx mint groups + raw transfers + the new cursor. Throws on RPC failure.
  */
 export async function pollMints(
   lastBlock: number,
   latest: number,
 ): Promise<MintPollResult> {
   const window = logWindow(lastBlock, latest);
-  if (!window) return { mints: [], latestBlock: latest };
+  if (!window) {
+    return { mints: [], transfers: [], latestBlock: latest };
+  }
 
   const logs = await fetchLogs({
     address: NFT_ADDR,
-    topics: [TRANSFER_TOPIC0, ZERO_ADDRESS_TOPIC, null],
+    topics: [TRANSFER_TOPIC0],
     from: window.from,
     to: window.to,
   });
 
   if (!Array.isArray(logs) || logs.length === 0) {
-    return { mints: [], latestBlock: window.to };
+    return { mints: [], transfers: [], latestBlock: window.to };
   }
 
   const tsFor = await resolveTimestamps(logs);
 
-  // Group by tx — one embed per mint transaction, not per token.
+  // Split mints (from = 0x0) from ordinary transfers.
+  const mintLogs = logs.filter((l) => l.topics[1] === ZERO_ADDRESS_TOPIC);
+  const transferLogs = logs.filter((l) => l.topics[1] !== ZERO_ADDRESS_TOPIC);
+
+  const transfers: OgTransfer[] = transferLogs.map((log) => ({
+    blockNumber: parseInt(log.blockNumber, 16),
+    txHash: log.transactionHash,
+    from: "0x" + log.topics[1].slice(-40),
+    to: "0x" + log.topics[2].slice(-40),
+    tokenId: parseInt(log.topics[3], 16),
+  }));
+  transfers.sort((a, b) => a.blockNumber - b.blockNumber);
+
+  // Group mints by tx — one embed per mint transaction, not per token.
   const byTx = new Map<
     string,
     { blockNumber: number; tokenIds: number[]; ts: number }
   >();
-  for (const log of logs) {
+  for (const log of mintLogs) {
     const bn = parseInt(log.blockNumber, 16);
     const tokenId = parseInt(log.topics[3], 16);
     const entry = byTx.get(log.transactionHash) ?? {
@@ -219,7 +269,7 @@ export async function pollMints(
   // Oldest-first so they post in chronological order.
   mints.sort((a, b) => a.blockNumber - b.blockNumber);
 
-  return { mints, latestBlock: window.to };
+  return { mints, transfers, latestBlock: window.to };
 }
 
 // --------------------------------------------------------------------------

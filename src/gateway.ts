@@ -28,8 +28,16 @@ import {
   pollSwaps as pollSwapsFeed,
 } from "./swapfeed";
 import { formatBurnMessage, pollBurns } from "./burnfeed";
-import { fetchTotalSupply, formatMintMessage, pollMints } from "./nftfeed";
+import { ogBalanceOf, fetchTotalSupply, formatMintMessage, pollMints } from "./nftfeed";
 import { postChannelMessage } from "./discord-rest";
+import {
+  codeKey,
+  memberKey,
+  removeOgRole,
+  walletKey,
+  type VerifyCodeEntry,
+  type WalletLink,
+} from "./verify";
 
 /**
  * Persistent state held in the DO's SQLite storage. Survives eviction — the
@@ -140,6 +148,10 @@ interface GatewayEnv {
   DISCORD_TOKEN: string;
   /** Discord channel id for the buys/sells feed. Empty = feed disabled. */
   BUYS_CHANNEL_ID?: string;
+  /** Guild for OG holder verification. */
+  GUILD_ID?: string;
+  /** OG Holder role id for verification. */
+  OG_ROLE_ID?: string;
 }
 
 export class GatewayDO implements DurableObject {
@@ -160,9 +172,86 @@ export class GatewayDO implements DurableObject {
   // Lifecycle: fetch (bootstrap) and alarm (heartbeat + presence + watchdog)
   // --------------------------------------------------------------------------
 
-  /** Called by the Worker's fetch() handler. Ensures a WS connection exists. */
-  async fetch(_request: Request): Promise<Response> {
+  /**
+   * Called by the Worker's fetch() handler. Also serves as the DO's internal
+   * storage API for the verify flow (/do/code, /do/wallet) — see verify.ts.
+   */
+  async fetch(request: Request): Promise<Response> {
     await this.hydrate();
+    const url = new URL(request.url);
+    const path = url.pathname;
+
+    // ---- verify-flow storage routes ----
+    if (path === "/do/code") {
+      const code = url.searchParams.get("code");
+      if (request.method === "PUT") {
+        const body = (await request.json()) as VerifyCodeEntry & { code?: string };
+        if (!body.code) return new Response(null, { status: 400 });
+        await this.state.storage.put(codeKey(body.code), {
+          memberId: body.memberId,
+          guildId: body.guildId,
+          expires: body.expires,
+        });
+        return new Response(null, { status: 204 });
+      }
+      if (request.method === "DELETE") {
+        if (code) await this.state.storage.delete(codeKey(code));
+        return new Response(null, { status: 204 });
+      }
+      if (request.method === "GET" && code) {
+        const entry = await this.state.storage.get<VerifyCodeEntry>(codeKey(code));
+        return entry
+          ? Response.json(entry)
+          : new Response(null, { status: 204 });
+      }
+      return new Response(null, { status: 405 });
+    }
+
+    if (path === "/do/wallet") {
+      const address = url.searchParams.get("address");
+      const memberId = url.searchParams.get("memberId");
+      if (request.method === "PUT") {
+        const body = (await request.json()) as WalletLink & { address?: string };
+        if (!body.address) return new Response(null, { status: 400 });
+        const addr = body.address.toLowerCase();
+        // Write both directions of the link (wallet -> member and back).
+        await Promise.all([
+          this.state.storage.put(walletKey(addr), {
+            memberId: body.memberId,
+            guildId: body.guildId,
+            linkedAt: body.linkedAt,
+          }),
+          this.state.storage.put(memberKey(body.memberId), addr),
+        ]);
+        return new Response(null, { status: 204 });
+      }
+      if (request.method === "DELETE") {
+        if (address) {
+          const addr = address.toLowerCase();
+          const link = await this.state.storage.get<WalletLink>(walletKey(addr));
+          await this.state.storage.delete(walletKey(addr));
+          if (link) await this.state.storage.delete(memberKey(link.memberId));
+        }
+        return new Response(null, { status: 204 });
+      }
+      if (request.method === "GET") {
+        if (address) {
+          const link = await this.state.storage.get<WalletLink>(
+            walletKey(address.toLowerCase()),
+          );
+          return link ? Response.json(link) : new Response(null, { status: 204 });
+        }
+        if (memberId) {
+          const addr = await this.state.storage.get<string>(memberKey(memberId));
+          return addr
+            ? Response.json({ address: addr })
+            : new Response(null, { status: 204 });
+        }
+      }
+      return new Response(null, { status: 405 });
+    }
+
+    // ---- default: bootstrap the gateway connection ----
     await this.ensureConnected();
     return new Response("ok\n", {
       headers: { "content-type": "text/plain; charset=utf-8" },
@@ -330,7 +419,7 @@ export class GatewayDO implements DurableObject {
         }
       }
 
-      // OG NFT mints.
+      // OG NFT mints (+ transfer watching for role auto-revoke).
       if (due.mints) {
         try {
           const mints = await pollMints(this.mem.mintLastBlock, latest);
@@ -355,6 +444,9 @@ export class GatewayDO implements DurableObject {
             }
             console.log(`[feed] posted ${mints.mints.length} mint(s)`);
           }
+          // A linked wallet that MOVED an OG may no longer hold one — re-check
+          // its balance and drop the role if it hit zero.
+          await this.revokeIfEmptied(mints.transfers.map((t) => t.from));
         } catch (err) {
           console.warn("[feed] mint poll failed:", err);
           if (this.is429(err)) saw429 = true;
@@ -376,6 +468,40 @@ export class GatewayDO implements DurableObject {
   /** True when the error is the public RPC rate-limiting us (HTTP 429). */
   private is429(err: unknown): boolean {
     return String((err as Error | undefined)?.message ?? err).includes("429");
+  }
+
+  /**
+   * Auto-revoke: for each sender of an OG transfer that has a verified
+   * wallet link, re-check balanceOf — if they no longer hold any OG, remove
+   * the OG Holder role and forget the link. Failures are logged, not thrown
+   * (the next transfer re-triggers the check).
+   */
+  private async revokeIfEmptied(senders: string[]): Promise<void> {
+    const guildId = this.env.GUILD_ID ?? "";
+    const roleId = this.env.OG_ROLE_ID ?? "";
+    if (!guildId || !roleId) return;
+
+    // Deduplicate — batch mints can emit several transfers per sender.
+    for (const sender of new Set(senders.map((s) => s.toLowerCase()))) {
+      const link = await this.state.storage.get<WalletLink>(walletKey(sender));
+      if (!link) continue; // not a verified holder — nothing to do
+      try {
+        const balance = await ogBalanceOf(sender);
+        if (balance == null) continue; // RPC flaked — keep the role for now
+        if (balance > 0n) continue; // still holds (moved one, has others)
+        await removeOgRole(
+          this.env.DISCORD_TOKEN,
+          link.guildId,
+          roleId,
+          link.memberId,
+        );
+        await this.state.storage.delete(walletKey(sender));
+        await this.state.storage.delete(memberKey(link.memberId));
+        console.log(`[verify] auto-revoked ${sender} (member ${link.memberId})`);
+      } catch (err) {
+        console.warn(`[verify] revoke check failed for ${sender}:`, err);
+      }
+    }
   }
 
   /**

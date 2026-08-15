@@ -162,3 +162,23 @@ export const NFT_METADATA_BASE = "https://gachawiki-ogs.pages.dev";
 
 /** Collection max supply — for the "X/1,000 minted" embed footer. */
 export const NFT_MAX_SUPPLY = 1000;
+
+// ---------------------------------------------------------------------------
+// v4: OG holder verification (OG Holder role gate)
+// ---------------------------------------------------------------------------
+
+/**
+ * The wiki's verify page URL — linked in the /verify command's ephemeral
+ * reply. Must match the actual page route on the site.
+ */
+export const WIKI_VERIFY_URL = "https://gachawiki.net/verify";
+
+/**
+ * EIP-191 message a holder signs to prove wallet ownership. MUST match the
+ * message the wiki's verify page asks the wallet to sign, character for
+ * character (the one-time code is appended).
+ */
+export const VERIFY_MESSAGE_PREFIX = "GachaWiki OG verification: ";
+
+/** How long a /verify one-time code stays valid. */
+export const VERIFY_CODE_TTL_MS = 15 * 60_000;
