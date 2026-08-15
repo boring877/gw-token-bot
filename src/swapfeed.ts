@@ -6,14 +6,21 @@
 
 import { SWAP_TOPIC0 } from "./abi";
 import {
+  ASSET_BASE_URL,
   EXPLORER_URL,
   POOL_ADDR,
-  RH_RPC,
-  SWAP_POLL_BLOCK_RANGE,
   SWAP_BURST_THRESHOLD,
-  TOKEN_DECIMALS,
 } from "./config";
 import type { DiscordEmbed, DiscordMessagePayload } from "./discord-rest";
+import {
+  fetchLogs,
+  logWindow,
+  resolveTimestamps,
+  toHuman,
+  toSigned256,
+  toUnsigned,
+  type EvmLog,
+} from "./evm";
 
 /** Direction of a trade from the $GW holder's perspective. */
 export type SwapDirection = "buy" | "sell";
@@ -46,60 +53,12 @@ export interface PollResult {
   latestBlock: number;
 }
 
-/** Minimal EVM log shape we read from eth_getLogs. */
-interface EvmLog {
-  blockNumber: string;
-  transactionHash: string;
-  logIndex: string;
-  data: string;
-}
-
 /**
  * Persistent feed state — stored alongside gateway state in the DO.
  */
 export interface FeedState {
   /** Highest block number we've already scanned. 0 = never polled. */
   lastBlock: number;
-}
-
-/** Make a JSON-RPC request to the Robinhood RPC. */
-async function rpc(method: string, params: unknown[]): Promise<unknown> {
-  const res = await fetch(RH_RPC, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    signal: AbortSignal.timeout(8_000),
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-  });
-  if (!res.ok) throw new Error(`rpc http ${res.status}`);
-  const json = (await res.json()) as { result?: unknown; error?: unknown };
-  if (json.error) throw new Error(`rpc error: ${JSON.stringify(json.error)}`);
-  return json.result;
-}
-
-/** Decode a 32-byte hex word as a signed int256. */
-function toSigned256(hexWord: string): bigint {
-  const clean = hexWord.replace(/^0x/, "").padStart(64, "0").slice(0, 64);
-  const bi = BigInt("0x" + clean);
-  // Two's-complement sign flip if the top bit is set.
-  return bi >= 1n << 255n ? bi - (1n << 256n) : bi;
-}
-
-/** Decode a 32-byte hex word as an unsigned uint160/uint128. */
-function toUnsigned(hexWord: string): bigint {
-  const clean = hexWord.replace(/^0x/, "").padStart(64, "0").slice(0, 64);
-  return BigInt("0x" + clean);
-}
-
-/** Wei-scale a raw bigint amount to a human number (18 decimals). */
-function toHuman(raw: bigint): number {
-  // Use integer + fractional split to avoid Number precision loss on huge ints.
-  const negative = raw < 0n;
-  const abs = negative ? -raw : raw;
-  const whole = abs / 10n ** BigInt(TOKEN_DECIMALS);
-  const frac = abs % 10n ** BigInt(TOKEN_DECIMALS);
-  const fracStr = frac.toString().padStart(TOKEN_DECIMALS, "0").slice(0, 6);
-  const n = Number(`${whole}.${fracStr}`);
-  return negative ? -n : n;
 }
 
 /**
@@ -169,72 +128,36 @@ function decodeLog(log: EvmLog, blockTimestamp: number): DecodedSwap | null {
   }
 }
 
-/** Fetch block timestamps for the blocks of any swaps we decoded. */
-async function fetchBlockTimestamps(
-  blockNumbers: number[],
-): Promise<Map<number, number>> {
-  const out = new Map<number, number>();
-  // Deduplicate + batch.
-  const unique = [...new Set(blockNumbers)];
-  await Promise.all(
-    unique.map(async (bn) => {
-      try {
-        const block = (await rpc("eth_getBlockByNumber", [
-          "0x" + bn.toString(16),
-          false,
-        ])) as { timestamp?: string } | null;
-        if (block?.timestamp) out.set(bn, parseInt(block.timestamp, 16));
-      } catch {
-        // Leave missing — timestamp is cosmetic.
-      }
-    }),
-  );
-  return out;
-}
-
 /**
- * Poll for new Swap events since `lastBlock`. Returns decoded swaps + the new
- * cursor. Throws on RPC failure — caller decides whether to retry.
+ * Poll for new Swap events since `lastBlock`. `latest` is the already-fetched
+ * chain head (shared across feeds to spare the public RPC's rate limit).
+ * Returns decoded swaps + the new cursor. Throws on RPC failure.
  */
-export async function pollSwaps(state: FeedState): Promise<PollResult> {
-  // First poll: start from latest - range so we don't scan all of history.
-  const latestHex = (await rpc("eth_blockNumber", [])) as string;
-  const latest = parseInt(latestHex, 16);
-
-  let fromBlock: number;
-  if (state.lastBlock === 0) {
-    fromBlock = Math.max(0, latest - SWAP_POLL_BLOCK_RANGE);
-  } else {
-    fromBlock = state.lastBlock + 1;
-  }
-
-  // Clamp the range — some RPCs reject huge ranges.
-  const toBlock = Math.min(latest, fromBlock + SWAP_POLL_BLOCK_RANGE);
-  if (fromBlock > toBlock) {
+export async function pollSwaps(
+  state: FeedState,
+  latest: number,
+): Promise<PollResult> {
+  const window = logWindow(state.lastBlock, latest);
+  if (!window) {
     return { swaps: [], latestBlock: latest };
   }
 
-  const logs = (await rpc("eth_getLogs", [
-    {
-      address: POOL_ADDR,
-      topics: [SWAP_TOPIC0],
-      fromBlock: "0x" + fromBlock.toString(16),
-      toBlock: "0x" + toBlock.toString(16),
-    },
-  ])) as EvmLog[];
+  const logs = await fetchLogs({
+    address: POOL_ADDR,
+    topics: [SWAP_TOPIC0],
+    from: window.from,
+    to: window.to,
+  });
 
   if (!Array.isArray(logs) || logs.length === 0) {
-    return { swaps: [], latestBlock: toBlock };
+    return { swaps: [], latestBlock: window.to };
   }
 
-  // Fetch block timestamps for all logs in one batch.
-  const blockNums = logs.map((l) => parseInt(l.blockNumber, 16));
-  const timestamps = await fetchBlockTimestamps(blockNums);
+  const tsFor = await resolveTimestamps(logs);
 
   const swaps: DecodedSwap[] = [];
   for (const log of logs) {
-    const bn = parseInt(log.blockNumber, 16);
-    const decoded = decodeLog(log, timestamps.get(bn) ?? 0);
+    const decoded = decodeLog(log, tsFor(log));
     if (decoded) swaps.push(decoded);
   }
 
@@ -245,7 +168,7 @@ export async function pollSwaps(state: FeedState): Promise<PollResult> {
       : a.logIndex - b.logIndex,
   );
 
-  return { swaps, latestBlock: toBlock };
+  return { swaps, latestBlock: window.to };
 }
 
 // --------------------------------------------------------------------------
@@ -256,42 +179,36 @@ export async function pollSwaps(state: FeedState): Promise<PollResult> {
 const COLOR_BUY = 0x4caf50; // green
 const COLOR_SELL = 0xff5252; // red
 
-/** Curated celebratory GIFs for buys — picked at random, no API key needed. */
-const BUY_GIFS = [
-  "https://media.tenor.com/1nbB1OH8X9kAAAAC/to-the-moon-rocket.gif",
-  "https://media.tenor.com/yQDA0NPQ8YwAAAAC/money-cash.gif",
-  "https://media.tenor.com/x8v1oNUOmg4AAAAC/rain-money.gif",
-  "https://media.tenor.com/5zhb6vJHx6kAAAAC/cheers-beer.gif",
-  "https://media.tenor.com/3Z0XNY0Nmx4AAAAC/pump-it-lambo.gif",
-];
+/**
+ * Custom animated GIFs served by THIS worker as static assets (generated by
+ * tools/make_gifs.py) — replaces the old hardcoded Tenor URLs, which mostly
+ * 404'd. Self-hosting also means Discord's image proxy can't 404 behind us.
+ */
+const BUY_GIF_URL = `${ASSET_BASE_URL}/gifs/buy.gif`;
+const SELL_GIF_URL = `${ASSET_BASE_URL}/gifs/sell.gif`;
 
 /** Format an ETH amount with up to 6 decimals. */
-function fmtEth(n: number): string {
+export function fmtEth(n: number): string {
   if (n >= 1) return n.toFixed(4);
   return n.toFixed(6);
 }
 
 /** Format a $GW amount with grouping + sensible decimals. */
-function fmtGw(n: number): string {
+export function fmtGw(n: number): string {
   if (n >= 1000) return Math.floor(n).toLocaleString("en-US");
   if (n >= 1) return n.toFixed(2);
   return n.toFixed(4);
 }
 
-/** Shorten a tx hash for display: 0x1234…abcd. */
-function shortHash(hash: string): string {
+/** Shorten a tx hash (or address) for display: 0x1234…abcd. */
+export function shortHash(hash: string): string {
   if (hash.length < 12) return hash;
   return `${hash.slice(0, 6)}…${hash.slice(-4)}`;
 }
 
-/** Pick a random buy GIF. */
-function randomBuyGif(): string {
-  return BUY_GIFS[Math.floor(Math.random() * BUY_GIFS.length)];
-}
-
 /**
  * Build a Discord message for a single swap. Uses an embed for color + layout;
- * buys get a random celebratory GIF, sells get a plain red embed.
+ * both directions attach our self-hosted GIF (green up / red down).
  *
  * @param swap The decoded swap.
  * @param ethPriceUsd Current ETH USD price, for converting WETH to USD. If null,
@@ -331,10 +248,7 @@ export function formatSwapMessage(
   if (swap.timestamp) {
     embed.timestamp = new Date(swap.timestamp * 1000).toISOString();
   }
-  // Buy celebration GIF.
-  if (isBuy) {
-    embed.image = { url: randomBuyGif() };
-  }
+  embed.image = { url: isBuy ? BUY_GIF_URL : SELL_GIF_URL };
 
   return { embeds: [embed] };
 }

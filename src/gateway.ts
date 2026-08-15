@@ -9,6 +9,7 @@
 // wall-clock compute duration (~85% of the free-tier daily budget at 128MB).
 
 import {
+  BURN_MINT_POLL_INTERVAL_MS,
   GATEWAY_URL,
   INTENTS,
   MAX_ALARM_DELAY_MS,
@@ -17,6 +18,7 @@ import {
   PRESENCE_INTERVAL_MS,
   SWAP_POLL_INTERVAL_MS,
 } from "./config";
+import { fetchLatestBlock } from "./evm";
 import { fetchGwStats, type Stats } from "./dexscreener";
 import { buildStatSlots, presenceForIndex } from "./presence";
 import {
@@ -24,8 +26,9 @@ import {
   formatSwapMessage,
   isBurst,
   pollSwaps as pollSwapsFeed,
-  type FeedState,
 } from "./swapfeed";
+import { formatBurnMessage, pollBurns } from "./burnfeed";
+import { fetchTotalSupply, formatMintMessage, pollMints } from "./nftfeed";
 import { postChannelMessage } from "./discord-rest";
 
 /**
@@ -47,6 +50,12 @@ interface GatewayState {
   nextPresence: number;
   /** Epoch ms when we should next poll for new swaps. */
   nextSwapPoll: number;
+  /** Epoch ms when we should next poll for burns. */
+  nextBurnPoll: number;
+  /** Epoch ms when we should next poll for OG mints. */
+  nextMintPoll: number;
+  /** Active 429 backoff (ms), 0 = none. Doubles per consecutive failure, 60s cap. */
+  rpcBackoffMs: number;
   /** Current index into the stat cycle (0..5). */
   statIndex: number;
   /** Last-known stats (for fallback when DexScreener is unreachable). */
@@ -60,6 +69,12 @@ interface GatewayState {
   ethPriceUsd: number | null;
   /** Epoch ms when ethPriceUsd was refreshed. */
   ethPriceTs: number;
+  /** --- Burn feed state --- **/
+  /** Highest block scanned for $GW burns (Transfer-to-dead). 0 = never polled. */
+  burnLastBlock: number;
+  /** --- NFT mint feed state --- **/
+  /** Highest block scanned for OG mints. 0 = never polled. */
+  mintLastBlock: number;
 }
 
 /** Initial state for a fresh DO that has never connected. */
@@ -71,12 +86,17 @@ const FRESH_STATE: GatewayState = {
   nextHeartbeat: 0,
   nextPresence: 0,
   nextSwapPoll: 0,
+  nextBurnPoll: 0,
+  nextMintPoll: 0,
+  rpcBackoffMs: 0,
   statIndex: 0,
   lastStats: null,
   identified: false,
   lastBlock: 0,
   ethPriceUsd: null,
   ethPriceTs: 0,
+  burnLastBlock: 0,
+  mintLastBlock: 0,
 };
 
 /** ETH USD price cache TTL — refresh at most every 5 min. */
@@ -177,12 +197,20 @@ export class GatewayDO implements DurableObject {
       this.mem.nextPresence = now + PRESENCE_INTERVAL_MS;
     }
 
-    // Swap feed poll due? (only if a channel id is configured)
+    // On-chain feed polls due? (only if a channel id is configured)
     const channelId = this.env.BUYS_CHANNEL_ID ?? "";
-    if (this.mem.identified && channelId && now >= this.mem.nextSwapPoll) {
+    const swapDue = now >= this.mem.nextSwapPoll;
+    const burnDue = now >= this.mem.nextBurnPoll;
+    const mintDue = now >= this.mem.nextMintPoll;
+    if (this.mem.identified && channelId && (swapDue || burnDue || mintDue)) {
+      // Advance the timers synchronously so a slow RPC can't cause a
+      // double poll on the next alarm; 429 backoff inside tickFeeds can
+      // push them out further.
+      if (swapDue) this.mem.nextSwapPoll = now + SWAP_POLL_INTERVAL_MS;
+      if (burnDue) this.mem.nextBurnPoll = now + BURN_MINT_POLL_INTERVAL_MS;
+      if (mintDue) this.mem.nextMintPoll = now + BURN_MINT_POLL_INTERVAL_MS;
       // Run without awaiting so a slow RPC can't stall heartbeat/presence.
-      void this.tickSwapFeed(channelId);
-      this.mem.nextSwapPoll = now + SWAP_POLL_INTERVAL_MS;
+      void this.tickFeeds(channelId, { swaps: swapDue, burns: burnDue, mints: mintDue });
     }
 
     await this.persist();
@@ -190,15 +218,21 @@ export class GatewayDO implements DurableObject {
   }
 
   // --------------------------------------------------------------------------
-  // Swap feed — poll eth_getLogs, post new swaps to the Discord channel.
+  // On-chain feeds — poll eth_getLogs, post new swaps + burns + OG mints.
   // --------------------------------------------------------------------------
 
   /**
-   * One feed tick: poll for new swaps since lastBlock, refresh ETH price if
-   * stale, then post each swap (or a burst summary) to the buys channel.
-   * Errors are logged and swallowed — a failed poll never crashes the DO.
+   * One feed tick: refresh ETH price if stale, fetch the chain head ONCE,
+   * then run whichever polls are due — swaps (10s cadence), burns and OG
+   * mints (60s cadence). Each poll runs in its own try/catch so one feed
+   * failing can't kill the others. Errors are logged and swallowed — a
+   * failed poll never crashes the DO. A 429 from the public RPC engages an
+   * exponential backoff on all feed timers.
    */
-  private async tickSwapFeed(channelId: string): Promise<void> {
+  private async tickFeeds(
+    channelId: string,
+    due: { swaps: boolean; burns: boolean; mints: boolean },
+  ): Promise<void> {
     try {
       // Refresh ETH price if older than the TTL.
       if (
@@ -212,39 +246,154 @@ export class GatewayDO implements DurableObject {
         }
       }
 
-      const feedState: FeedState = { lastBlock: this.mem.lastBlock };
-      const result = await pollSwapsFeed(feedState);
-      // Advance the cursor even if we couldn't decode some logs.
-      this.mem.lastBlock = result.latestBlock;
-
-      if (result.swaps.length === 0) return;
-
-      if (isBurst(result.swaps.length)) {
-        // Collapse a large batch into one summary message.
-        const payload = formatBurstMessage(result.swaps, this.mem.ethPriceUsd);
-        await postChannelMessage(this.env.DISCORD_TOKEN, channelId, payload);
-        console.log(
-          `[feed] burst: ${result.swaps.length} swaps -> 1 summary message`,
-        );
+      // ONE chain-head call per tick, shared by every due feed — the public
+      // RPC 429s if each feed polls eth_blockNumber independently.
+      let latest: number;
+      try {
+        latest = await fetchLatestBlock();
+      } catch (err) {
+        console.warn("[feed] chain head fetch failed:", err);
+        if (this.is429(err)) this.applyRpcBackoff();
         return;
       }
 
-      // Post each swap individually (chronological order).
-      for (const swap of result.swaps) {
-        const payload = formatSwapMessage(swap, this.mem.ethPriceUsd);
+      let saw429 = false;
+
+      // Swaps.
+      if (due.swaps) {
         try {
-          await postChannelMessage(this.env.DISCORD_TOKEN, channelId, payload);
+          const result = await pollSwapsFeed(
+            { lastBlock: this.mem.lastBlock },
+            latest,
+          );
+          // Advance the cursor even if we couldn't decode some logs.
+          this.mem.lastBlock = result.latestBlock;
+
+          if (result.swaps.length > 0) {
+            if (isBurst(result.swaps.length)) {
+              // Collapse a large batch into one summary message.
+              const payload = formatBurstMessage(
+                result.swaps,
+                this.mem.ethPriceUsd,
+              );
+              await postChannelMessage(this.env.DISCORD_TOKEN, channelId, payload);
+              console.log(
+                `[feed] burst: ${result.swaps.length} swaps -> 1 summary message`,
+              );
+            } else {
+              // Post each swap individually (chronological order).
+              for (const swap of result.swaps) {
+                const payload = formatSwapMessage(swap, this.mem.ethPriceUsd);
+                try {
+                  await postChannelMessage(
+                    this.env.DISCORD_TOKEN,
+                    channelId,
+                    payload,
+                  );
+                } catch (err) {
+                  // One failed post shouldn't abort the rest of the batch.
+                  console.warn(`[feed] post failed for ${swap.txHash}:`, err);
+                }
+              }
+              console.log(`[feed] posted ${result.swaps.length} swap(s)`);
+            }
+          }
         } catch (err) {
-          // One failed post shouldn't abort the rest of the batch.
-          console.warn(`[feed] post failed for ${swap.txHash}:`, err);
+          console.warn("[feed] swap poll failed:", err);
+          if (this.is429(err)) saw429 = true;
         }
       }
-      console.log(`[feed] posted ${result.swaps.length} swap(s)`);
+
+      // $GW burns (Transfer-to-dead).
+      if (due.burns) {
+        try {
+          const burns = await pollBurns(this.mem.burnLastBlock, latest);
+          this.mem.burnLastBlock = burns.latestBlock;
+          for (const burn of burns.burns) {
+            try {
+              // USD valuation from the cached DexScreener spot price.
+              const payload = formatBurnMessage(
+                burn,
+                this.mem.lastStats?.price ?? null,
+              );
+              await postChannelMessage(this.env.DISCORD_TOKEN, channelId, payload);
+            } catch (err) {
+              console.warn(`[feed] burn post failed for ${burn.txHash}:`, err);
+            }
+          }
+          if (burns.burns.length > 0) {
+            console.log(`[feed] posted ${burns.burns.length} burn(s)`);
+          }
+        } catch (err) {
+          console.warn("[feed] burn poll failed:", err);
+          if (this.is429(err)) saw429 = true;
+        }
+      }
+
+      // OG NFT mints.
+      if (due.mints) {
+        try {
+          const mints = await pollMints(this.mem.mintLastBlock, latest);
+          this.mem.mintLastBlock = mints.latestBlock;
+          if (mints.mints.length > 0) {
+            const supply = await fetchTotalSupply();
+            for (const mint of mints.mints) {
+              try {
+                const payload = formatMintMessage(
+                  mint,
+                  this.mem.ethPriceUsd,
+                  supply,
+                );
+                await postChannelMessage(
+                  this.env.DISCORD_TOKEN,
+                  channelId,
+                  payload,
+                );
+              } catch (err) {
+                console.warn(`[feed] mint post failed for ${mint.txHash}:`, err);
+              }
+            }
+            console.log(`[feed] posted ${mints.mints.length} mint(s)`);
+          }
+        } catch (err) {
+          console.warn("[feed] mint poll failed:", err);
+          if (this.is429(err)) saw429 = true;
+        }
+      }
+
+      if (saw429) {
+        this.applyRpcBackoff();
+      } else {
+        this.mem.rpcBackoffMs = 0;
+      }
     } catch (err) {
-      console.warn("[feed] poll failed:", err);
+      console.warn("[feed] tick failed:", err);
     } finally {
       await this.persist();
     }
+  }
+
+  /** True when the error is the public RPC rate-limiting us (HTTP 429). */
+  private is429(err: unknown): boolean {
+    return String((err as Error | undefined)?.message ?? err).includes("429");
+  }
+
+  /**
+   * Exponential backoff when the public RPC rate-limits us: push all feed
+   * timers out (15s → 30s → 60s cap) so we stop hammering it. Reset on the
+   * next fully-successful tick.
+   */
+  private applyRpcBackoff(): void {
+    const backoff = Math.min(
+      60_000,
+      Math.max(15_000, this.mem.rpcBackoffMs * 2 || 15_000),
+    );
+    this.mem.rpcBackoffMs = backoff;
+    const until = Date.now() + backoff;
+    this.mem.nextSwapPoll = Math.max(this.mem.nextSwapPoll, until);
+    this.mem.nextBurnPoll = Math.max(this.mem.nextBurnPoll, until);
+    this.mem.nextMintPoll = Math.max(this.mem.nextMintPoll, until);
+    console.warn(`[feed] rpc 429 — backing off ${backoff / 1000}s`);
   }
 
   // --------------------------------------------------------------------------
@@ -498,6 +647,8 @@ export class GatewayDO implements DurableObject {
     if (this.mem.heartbeatIntervalMs > 0) candidates.push(this.mem.nextHeartbeat);
     if (this.mem.nextPresence > 0) candidates.push(this.mem.nextPresence);
     if (this.mem.nextSwapPoll > 0) candidates.push(this.mem.nextSwapPoll);
+    if (this.mem.nextBurnPoll > 0) candidates.push(this.mem.nextBurnPoll);
+    if (this.mem.nextMintPoll > 0) candidates.push(this.mem.nextMintPoll);
     let next = candidates.reduce<number>(
       (a, b) => (a && b ? Math.min(a, b) : a || b),
       0,
