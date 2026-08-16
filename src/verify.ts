@@ -170,7 +170,7 @@ export async function handleRolePickInteraction(
       type: 4,
       data: {
         content:
-          "✅ **You're in!** Member role granted — the chat channels are now visible." +
+          "**You're in!** Member role granted — the chat channels are now visible." +
           "\nHolding a GachaWiki OG? Run `/verify` in the verify channel for the holder channels.",
         flags: EPHEMERAL,
       },
