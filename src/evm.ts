@@ -250,7 +250,7 @@ export interface LogsResult {
  * windows again — slower, but never lossy. Combined worst tick stays under
  * the ~50-subrequest invocation cap.
  */
-const chunkBudgets: Record<string, number> = { swap: 22, burn: 9, mint: 9 };
+const chunkBudgets: Record<string, number> = { swap: 22, burn: 40, mint: 40 };
 
 /** Which feed a log fetch belongs to (chunk-budget lane). */
 export type LogLane = "swap" | "burn" | "mint";
@@ -258,8 +258,8 @@ export type LogLane = "swap" | "burn" | "mint";
 /** Reset the per-tick chunk budgets (called at the start of each feed tick). */
 export function resetLogChunkBudget(): void {
   chunkBudgets.swap = 22;
-  chunkBudgets.burn = 9;
-  chunkBudgets.mint = 9;
+  chunkBudgets.burn = 40;
+  chunkBudgets.mint = 40;
 }
 
 /**

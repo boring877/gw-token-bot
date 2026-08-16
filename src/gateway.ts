@@ -329,7 +329,12 @@ export class GatewayDO implements DurableObject {
       // push them out further.
       if (swapDue) this.mem.nextSwapPoll = now + SWAP_POLL_INTERVAL_MS;
       if (burnDue) this.mem.nextBurnPoll = now + BURN_MINT_POLL_INTERVAL_MS;
-      if (mintDue) this.mem.nextMintPoll = now + BURN_MINT_POLL_INTERVAL_MS;
+      // Mint polls run offset half a cycle from burns so each gets its own
+      // alarm invocation (and thus the full subrequest budget for chunks).
+      if (mintDue) {
+        this.mem.nextMintPoll =
+          now + BURN_MINT_POLL_INTERVAL_MS + (burnDue ? 15_000 : 0);
+      }
       // Run without awaiting so a slow RPC can't stall heartbeat/presence.
       void this.tickFeeds(channelId, { swaps: swapDue, burns: burnDue, mints: mintDue });
     }
