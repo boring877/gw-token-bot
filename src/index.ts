@@ -9,6 +9,7 @@ import { RH_RPC } from "./config";
 import { setGeneralRpcUrl } from "./evm";
 import {
   doStore,
+  handleRolePickInteraction,
   handleVerifyInteraction,
   handleVerifyLink,
 } from "./verify";
@@ -25,6 +26,8 @@ interface Env {
   GUILD_ID: string;
   /** The OG Holder role id (created via Discord REST). */
   OG_ROLE_ID: string;
+  /** The Member role id (the #roles select-menu gate). */
+  MEMBER_ROLE_ID?: string;
   /** Alchemy endpoint for general RPC calls (secret; free tier 10-block getLogs cap means logs stay on the public RPC). */
   ALCHEMY_URL?: string;
 }
@@ -131,11 +134,23 @@ export default {
       if (!authentic) {
         return new Response("invalid request signature", { status: 401 });
       }
-      const interaction = JSON.parse(body) as Parameters<
-        typeof handleVerifyInteraction
-      >[2];
-      const store = doStore(getGatewayStub(env));
-      const reply = await handleVerifyInteraction(env, store, interaction);
+      const interaction = JSON.parse(body) as { type: number } & Record<
+        string,
+        unknown
+      >;
+      // One endpoint, two interaction kinds: MESSAGE_COMPONENT (the #roles
+      // pick gate) and APPLICATION_COMMAND (/verify, /check).
+      const reply =
+        interaction.type === 3
+          ? await handleRolePickInteraction(
+              env,
+              interaction as Parameters<typeof handleRolePickInteraction>[1],
+            )
+          : await handleVerifyInteraction(
+              env,
+              doStore(getGatewayStub(env)),
+              interaction as Parameters<typeof handleVerifyInteraction>[2],
+            );
       return Response.json(reply);
     }
 

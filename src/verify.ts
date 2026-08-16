@@ -118,6 +118,72 @@ export async function assignOgRole(
   }
 }
 
+/**
+ * Handle a role-pick select-menu interaction from the #roles gate channel:
+ * picking "Member" grants the Member role (the human/bot security check —
+ * scripts don't click Discord components). Responds ephemerally.
+ */
+export async function handleRolePickInteraction(
+  env: { DISCORD_TOKEN: string; GUILD_ID: string; MEMBER_ROLE_ID?: string },
+  interaction: {
+    type: number;
+    guild_id?: string;
+    data?: { custom_id?: string; values?: string[] };
+    member?: { user?: { id?: string } };
+    user?: { id?: string };
+  },
+): Promise<{ type: number; data?: { content: string; flags: number } }> {
+  const EPHEMERAL = 64;
+  const memberId = interaction.member?.user?.id ?? interaction.user?.id;
+
+  if (
+    interaction.type !== 3 ||
+    interaction.data?.custom_id !== "member_pick" ||
+    interaction.guild_id !== env.GUILD_ID ||
+    !memberId
+  ) {
+    return { type: 4, data: { content: "Unknown selection.", flags: EPHEMERAL } };
+  }
+
+  if (!env.MEMBER_ROLE_ID) {
+    return {
+      type: 4,
+      data: { content: "Role setup incomplete — tell an admin.", flags: EPHEMERAL },
+    };
+  }
+
+  if (!interaction.data.values?.includes("member")) {
+    return {
+      type: 4,
+      data: { content: "Pick **Member** to unlock the server.", flags: EPHEMERAL },
+    };
+  }
+
+  try {
+    await assignOgRole(
+      env.DISCORD_TOKEN,
+      env.GUILD_ID,
+      env.MEMBER_ROLE_ID,
+      memberId,
+    );
+    return {
+      type: 4,
+      data: {
+        content:
+          "✅ **You're in!** Member role granted — the chat channels are now visible." +
+          "\nHolding a GachaWiki OG? Run `/verify` in the verify channel for the holder channels.",
+        flags: EPHEMERAL,
+      },
+    };
+  } catch (err) {
+    console.error("[roles] member pick failed:", err);
+    return {
+      type: 4,
+      data: { content: "Couldn't grant the role — ping an admin.", flags: EPHEMERAL },
+    };
+  }
+}
+
 /** Remove the OG Holder role from a member. Throws on Discord error. */
 export async function removeOgRole(
   token: string,

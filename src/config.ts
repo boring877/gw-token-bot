@@ -171,9 +171,10 @@ export const NFT_MAX_SUPPLY = 1000;
 
 /**
  * The wiki's verify page URL — linked in the /verify command's ephemeral
- * reply. Must match the actual page route on the site.
+ * reply. The wiki's canonical domain is gachawiki.info (astro.config.mjs
+ * `site`); gachawiki.net serves an unrelated app and must not be linked.
  */
-export const WIKI_VERIFY_URL = "https://gachawiki.net/verify";
+export const WIKI_VERIFY_URL = "https://gachawiki.info/verify";
 
 /**
  * EIP-191 message a holder signs to prove wallet ownership. MUST match the
