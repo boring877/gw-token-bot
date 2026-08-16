@@ -92,7 +92,8 @@ async function interactionIsAuthentic(
 
 /** Allowed browser origins for /verifylink (site + local dev). */
 const VERIFY_ALLOWED_ORIGINS = new Set([
-  "https://gachawiki.net",
+  "https://gachawiki.info",
+  "https://gacha-wiki.pages.dev",
   "http://localhost:4321",
   "http://127.0.0.1:4321",
 ]);
