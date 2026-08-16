@@ -12,6 +12,7 @@ import {
 } from "./abi";
 import {
   ASSET_BASE_URL,
+  DISCORD_INVITE,
   EXPLORER_URL,
   GW_ADDR,
   NFT_ADDR,
@@ -342,6 +343,11 @@ export function formatMintMessage(
     if (verse || jp) lines.push([verse, jp].filter(Boolean).join(" "));
     if (mint.meta.rarity) lines.push(`Rarity: **${mint.meta.rarity}**`);
   }
+
+  // Funnel for minters who aren't in the server yet.
+  lines.push(
+    `[Unlock the holder channels — join & \`/verify\`](${DISCORD_INVITE})`,
+  );
 
   let footer = `Block ${mint.blockNumber} · tx ${shortHash(mint.txHash)}`;
   if (totalSupply != null) {

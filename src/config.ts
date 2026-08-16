@@ -185,3 +185,9 @@ export const VERIFY_MESSAGE_PREFIX = "GachaWiki OG verification: ";
 
 /** How long a /verify one-time code stays valid. */
 export const VERIFY_CODE_TTL_MS = 15 * 60_000;
+
+/**
+ * Permanent server invite — used in mint embeds so minters who aren't in the
+ * Discord yet can join and verify for the holder channels.
+ */
+export const DISCORD_INVITE = "https://discord.gg/YdWFddQKR8";
