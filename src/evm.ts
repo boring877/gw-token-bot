@@ -255,6 +255,29 @@ const chunkBudgets: Record<string, number> = { swap: 22, burn: 40, mint: 40 };
 /** Which feed a log fetch belongs to (chunk-budget lane). */
 export type LogLane = "swap" | "burn" | "mint";
 
+/**
+ * DAILY cap on Alchemy-chunked getLogs requests. During the Aug-15/16
+ * public-RPC outages the chunked fallback ran flat-out for hours and burned
+ * half of Alchemy's free monthly compute in days. The cap keeps the fast
+ * catch-up path for bursts while making sustained chunk-storms impossible;
+ * over-cap ticks fall back to public-RPC retries (lossy-free, just slower).
+ */
+const DAILY_CHUNK_CAP = 2_500;
+let chunkDay = "";
+let chunksUsedToday = 0;
+let capWarnedToday = false;
+
+/** Remaining chunks for today (rolls over at UTC midnight, per isolate). */
+function dailyChunkBudget(): number {
+  const today = new Date().toISOString().slice(0, 10);
+  if (chunkDay !== today) {
+    chunkDay = today;
+    chunksUsedToday = 0;
+    capWarnedToday = false;
+  }
+  return Math.max(0, DAILY_CHUNK_CAP - chunksUsedToday);
+}
+
 /** Reset the per-tick chunk budgets (called at the start of each feed tick). */
 export function resetLogChunkBudget(): void {
   chunkBudgets.swap = 22;
@@ -283,12 +306,20 @@ async function fetchLogsChunked(
   if (nChunks > MAX_LOG_CHUNKS) {
     throw new Error(`window ${total} blocks exceeds chunk budget`);
   }
-  const usable = Math.min(nChunks, chunkBudgets[lane] ?? 0);
+  const usable = Math.min(nChunks, chunkBudgets[lane] ?? 0, dailyChunkBudget());
   if (usable <= 0) {
-    // No budget this tick — clean no-op, no cursor movement.
+    // No budget this tick (lane or daily Alchemy cap) — clean no-op, no
+    // cursor movement.
+    if (dailyChunkBudget() <= 0 && !capWarnedToday) {
+      capWarnedToday = true;
+      console.warn(
+        `[chain] daily Alchemy chunk cap (${DAILY_CHUNK_CAP}) hit — chunked fallback paused until UTC midnight`,
+      );
+    }
     return { logs: [], scannedTo: filter.from - 1 };
   }
   chunkBudgets[lane] = (chunkBudgets[lane] ?? 0) - usable;
+  chunksUsedToday += usable;
 
   const out: EvmLog[] = [];
   const BATCH = 8;
