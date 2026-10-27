@@ -14,11 +14,12 @@ import {
   handleVerifyInteraction,
   handleVerifyLink,
 } from "./verify";
+import { handleCodeInteraction } from "./wikicode";
 
 export { GatewayDO };
 
 /** Worker bindings: the DO binding name matches wrangler.toml + the secret. */
-interface Env {
+export interface Env {
   GATEWAY: DurableObjectNamespace;
   DISCORD_TOKEN: string;
   /** Discord channel id for the buys/sells/burns feed. Optional — empty = disabled. */
@@ -29,6 +30,12 @@ interface Env {
   OG_ROLE_ID: string;
   /** The Member role id (the #roles select-menu gate). */
   MEMBER_ROLE_ID?: string;
+  /** The Wiki Member role id (grants wiki access; checked by /code). */
+  WIKI_ROLE_ID?: string;
+  /** HMAC key shared with the gate worker (secret) — derives personal wiki codes. */
+  GW_SECRET?: string;
+  /** KV namespace shared with the gate worker (invite codes + member records). */
+  MEMBERS?: KVNamespace;
   /** Alchemy endpoint for general RPC calls (secret; free tier 10-block getLogs cap means logs stay on the public RPC). */
   ALCHEMY_URL?: string;
   /** Discord channel for GitHub wiki-commit updates (the #wiki-updates channel). */
@@ -152,17 +159,23 @@ export default {
       >;
       // One endpoint, two interaction kinds: MESSAGE_COMPONENT (the #roles
       // pick gate) and APPLICATION_COMMAND (/verify, /check).
+      const commandName = ((interaction as { data?: { name?: string } }).data ?? {}).name;
       const reply =
         interaction.type === 3
           ? await handleRolePickInteraction(
               env,
               interaction as Parameters<typeof handleRolePickInteraction>[1],
             )
-          : await handleVerifyInteraction(
-              env,
-              doStore(getGatewayStub(env)),
-              interaction as Parameters<typeof handleVerifyInteraction>[2],
-            );
+          : commandName === "code"
+            ? await handleCodeInteraction(
+                env,
+                interaction as Parameters<typeof handleCodeInteraction>[1],
+              )
+            : await handleVerifyInteraction(
+                env,
+                doStore(getGatewayStub(env)),
+                interaction as Parameters<typeof handleVerifyInteraction>[2],
+              );
       return Response.json(reply);
     }
 

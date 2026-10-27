@@ -35,12 +35,19 @@ directory = "./public"
 # GUILD_ID + OG_ROLE_ID drive holder verification (/verify -> OG Holder role);
 # the role was created via Discord REST (name "OG Holder", amber).
 [vars]
-BUYS_CHANNEL_ID = ""
+BUYS_CHANNEL_ID = "1536699696817381426"
 GUILD_ID = "1534112093752659968"
 OG_ROLE_ID = "1538113608427507742"
 MEMBER_ROLE_ID = "1538409320155324457"
+# Wiki Member role (grants GachaWiki access; checked by /code). Created via REST.
+WIKI_ROLE_ID = "1564572966421790850"
 # #wiki-updates (Info category) — target of the GitHub push webhook.
 WIKI_UPDATES_CHANNEL_ID = "1545851895074263080"
 # X crosspost: #x-feed was DELETED 2026-09-05 (no free X read path, user won't
 # pay for the API). src/xpost.ts stays dormant — no X_* secrets are set. If X
 # posting is ever revived, create a channel and re-add X_FEED_CHANNEL_ID here.
+
+# Shared with the gate worker (gacha-wiki repo): invite codes + member records.
+[[kv_namespaces]]
+binding = "MEMBERS"
+id = "6614fbfb7de34e97bf0603d3acc347ba"
