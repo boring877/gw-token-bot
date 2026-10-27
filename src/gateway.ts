@@ -187,6 +187,18 @@ export class GatewayDO implements DurableObject {
     const path = url.pathname;
 
     // ---- verify-flow storage routes ----
+    if (path === "/do/reset-session" && request.method === "POST") {
+      // Drop the persisted gateway session so the next connect sends a fresh
+      // IDENTIFY (needed when the intents bitmask changes; RESUME keeps old intents).
+      this.mem.sessionId = null;
+      this.mem.seq = null;
+      this.mem.resumeUrl = null;
+      this.mem.identified = false;
+      await this.persist();
+      this.detachSocket();
+      await this.ensureConnected();
+      return Response.json({ ok: true, freshIdentify: true });
+    }
     if (path === "/do/code") {
       const code = url.searchParams.get("code");
       if (request.method === "PUT") {
