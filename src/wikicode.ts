@@ -10,7 +10,7 @@ import type { Env } from "./index";
 const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 /** Minimum Discord account age for wiki access (anti-abuse rule). */
-const MIN_ACCOUNT_AGE_MS = 2 * 366 * 24 * 60 * 60 * 1000;
+export const MIN_ACCOUNT_AGE_MS = 2 * 366 * 24 * 60 * 60 * 1000;
 /** Discord epoch (2015-01-01) — snowflake IDs encode creation time in the top 42 bits. */
 const DISCORD_EPOCH_MS = 1420070400000;
 
