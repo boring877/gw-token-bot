@@ -86,6 +86,10 @@ interface GatewayState {
   /** --- NFT mint feed state --- **/
   /** Highest block scanned for OG mints. 0 = never polled. */
   mintLastBlock: number;
+  /** Diagnostics: last dispatch seen and MESSAGE_CREATE counter. */
+  lastDispatchAt?: number;
+  lastDispatchType?: string;
+  messageCreateCount?: number;
 }
 
 /** Initial state for a fresh DO that has never connected. */
@@ -193,6 +197,17 @@ export class GatewayDO implements DurableObject {
     const path = url.pathname;
 
     // ---- verify-flow storage routes ----
+    if (path === "/do/status") {
+      return Response.json({
+        socketOpen: this.isSocketOpen(),
+        identified: this.mem.identified,
+        hasSessionId: this.mem.sessionId != null,
+        lastDispatchType: this.mem.lastDispatchType ?? null,
+        lastDispatchAt: this.mem.lastDispatchAt ?? null,
+        secondsSinceDispatch: this.mem.lastDispatchAt ? Math.round((Date.now() - this.mem.lastDispatchAt) / 1000) : null,
+        messageCreateCount: this.mem.messageCreateCount ?? 0,
+      });
+    }
     if (path === "/do/reset-session" && request.method === "POST") {
       // Drop the persisted gateway session so the next connect sends a fresh
       // IDENTIFY (needed when the intents bitmask changes; RESUME keeps old intents).
@@ -707,6 +722,11 @@ export class GatewayDO implements DurableObject {
   }
 
   private async onDispatch(msg: DiscordMessage): Promise<void> {
+    this.mem.lastDispatchAt = Date.now();
+    this.mem.lastDispatchType = String(msg.t);
+    if (msg.t === "MESSAGE_CREATE") {
+      this.mem.messageCreateCount = (this.mem.messageCreateCount ?? 0) + 1;
+    }
     if (msg.t === "READY") {
       const d = msg.d as ReadyPayload;
       this.mem.sessionId = d?.session_id ?? null;

@@ -252,6 +252,12 @@ export default {
 
     // Token-guarded admin: rewind feed cursors so the feeds replay missed
     // blocks through their normal path (used after an outage backfill).
+    if (url.pathname === "/do/status") {
+      if (request.headers.get("x-admin-token") !== env.DISCORD_TOKEN) {
+        return new Response("forbidden", { status: 403 });
+      }
+      return getGatewayStub(env).fetch("https://do/do/status");
+    }
     if (url.pathname === "/do/reset-session" && request.method === "POST") {
       if (request.headers.get("x-admin-token") !== env.DISCORD_TOKEN) {
         return new Response("forbidden", { status: 403 });
