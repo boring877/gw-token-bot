@@ -65,18 +65,33 @@ export async function handleCodeInteraction(env: Env, interaction: CodeInteracti
   const code = await deriveWikiCode(env.GW_SECRET, memberId);
   const key = "invite:" + code;
   const existing = await env.MEMBERS.get(key);
-  const rec = existing
-    ? (JSON.parse(existing) as { email?: string | null })
-    : { email: null as string | null };
-  await env.MEMBERS.put(
-    key,
-    JSON.stringify({
-      discord: memberId,
-      discord_name: username,
-      email: rec.email ?? null,
-      created: Date.now(),
-    }),
-  );
+  // KV writes are the scarce free-tier resource: only write on first fetch or
+  // when something actually changed. Repeat /code runs stay read-only.
+  if (existing) {
+    const rec = JSON.parse(existing) as { discord?: string; email?: string | null };
+    const unchanged = rec.discord === memberId && rec.email != null;
+    if (!unchanged) {
+      await env.MEMBERS.put(
+        key,
+        JSON.stringify({
+          discord: memberId,
+          discord_name: username,
+          email: rec.email ?? null,
+          created: Date.now(),
+        }),
+      );
+    }
+  } else {
+    await env.MEMBERS.put(
+      key,
+      JSON.stringify({
+        discord: memberId,
+        discord_name: username,
+        email: null,
+        created: Date.now(),
+      }),
+    );
+  }
   return reply(
     "**Your GachaWiki personal code: `" + code + "`**\n" +
       "It never changes and is linked to your Discord account. Use it with your email at https://gachawiki.info to sign up or to reset your password. Keep it private.\n" +
