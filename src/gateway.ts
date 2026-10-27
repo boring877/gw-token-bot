@@ -147,6 +147,8 @@ interface DiscordMessage {
 
 interface GatewayEnv {
   DISCORD_TOKEN: string;
+  /** #og-holder-verify: human messages here get a multilingual redirect reply. */
+  OG_VERIFY_CHANNEL_ID?: string;
   /** Discord channel id for the buys/sells feed. Empty = feed disabled. */
   BUYS_CHANNEL_ID?: string;
   /** Guild for OG holder verification. */
@@ -700,6 +702,55 @@ export class GatewayDO implements DurableObject {
     } else if (msg.t === "RESUMED") {
       this.mem.identified = true;
       console.log("[gateway] RESUMED");
+    } else if (msg.t === "MESSAGE_CREATE") {
+      await this.onVerifyChannelMessage(
+        msg.d as { channel_id?: string; author?: { id?: string; bot?: boolean } },
+      );
+    }
+  }
+
+  /**
+   * Wrong-channel helper: when a human posts in #og-holder-verify (people keep
+   * going there for wiki access, and many do not read English), reply with the
+   * wiki-access directions in every community language. One reply per user per
+   * 10 minutes; bot authors are ignored.
+   */
+  private async onVerifyChannelMessage(d: {
+    channel_id?: string;
+    author?: { id?: string; bot?: boolean };
+  }): Promise<void> {
+    const channelId = d?.channel_id;
+    const author = d?.author;
+    if (!channelId || channelId !== this.env.OG_VERIFY_CHANNEL_ID) return;
+    if (!author?.id || author.bot) return;
+    const cooldownKey = `ogreply:${author.id}`;
+    const last = await this.state.storage.get<number>(cooldownKey);
+    if (last != null && Date.now() - last < 600_000) return;
+    await this.state.storage.put(cooldownKey, Date.now());
+    const REQ = "<#1564575899246923817>";
+    const ACC = "<#1564572970242805810>";
+    const content =
+      `<@${author.id}> wrong channel! ` +
+      `This channel is only for OG Holder (NFT) verification.
+` +
+      `**GachaWiki website access:**
+` +
+      `EN: Ask in ${REQ}, then type /code in ${ACC}
+` +
+      `JA: GachaWikiサイトへのアクセスは ${REQ} で申請し、${ACC} で /code と入力してください
+` +
+      `KO: GachaWiki 사이트 접근은 ${REQ} 에서 신청하고, ${ACC} 에서 /code 를 입력하세요
+` +
+      `中文: 如需访问 GachaWiki 网站, 请在 ${REQ} 申请, 然后在 ${ACC} 输入 /code
+` +
+      `VI: Để truy cập GachaWiki, hãy yêu cầu tại ${REQ}, sau đó gõ /code trong ${ACC}
+` +
+      `TH: หากต้องการเข้าถึง GachaWiki โปรดขอที่ ${REQ} แล้วพิมพ์ /code ใน ${ACC}`;
+    try {
+      const { postChannelMessage } = await import("./discord-rest");
+      await postChannelMessage(this.env.DISCORD_TOKEN, channelId, { content });
+    } catch (err) {
+      console.error("[gateway] verify-channel reply failed:", err);
     }
   }
 

@@ -41,6 +41,8 @@ OG_ROLE_ID = "1538113608427507742"
 MEMBER_ROLE_ID = "1538409320155324457"
 # Wiki Member role (grants GachaWiki access; checked by /code). Created via REST.
 WIKI_ROLE_ID = "1564572966421790850"
+# #og-holder-verify: auto multilingual redirect for wiki-access seekers.
+OG_VERIFY_CHANNEL_ID = "1538371900005285969"
 # #wiki-updates (Info category) — target of the GitHub push webhook.
 WIKI_UPDATES_CHANNEL_ID = "1545851895074263080"
 # X crosspost: #x-feed was DELETED 2026-09-05 (no free X read path, user won't
