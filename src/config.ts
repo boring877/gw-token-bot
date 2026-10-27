@@ -46,7 +46,7 @@ export const OP_RECV = {
 /** Discord gateway intents bitmask. v1 only *sets* presence, so we subscribe to no events. */
 /** Gateway intents: GUILD_MESSAGES (MESSAGE_CREATE) for the verify-channel
  * auto-reply. Message CONTENT is not read, so no privileged intent needed. */
-export const INTENTS = 1 << 9;
+export const INTENTS = 0;
 
 /**
  * How often to push a new stat to the presence. Slower than the banner's 3s

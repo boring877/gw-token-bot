@@ -11,12 +11,6 @@ const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 /** Minimum Discord account age for wiki access (anti-abuse rule). */
 export const MIN_ACCOUNT_AGE_MS = 2 * 366 * 24 * 60 * 60 * 1000;
-/** Discord epoch (2015-01-01) — snowflake IDs encode creation time in the top 42 bits. */
-const DISCORD_EPOCH_MS = 1420070400000;
-
-function accountCreatedAt(id: string): number {
-  return Number(BigInt(id) >> 22n) + DISCORD_EPOCH_MS;
-}
 
 async function hmacHex(secret: string, data: string): Promise<string> {
   const key = await crypto.subtle.importKey(
@@ -60,14 +54,13 @@ export async function handleCodeInteraction(env: Env, interaction: CodeInteracti
     return reply("The wiki code service is not configured yet. Tell the maintainer.");
   }
   if (!roles.includes(env.WIKI_ROLE_ID)) {
-    return reply("You need the **Wiki Member** role first. Ask the maintainer for it.");
-  }
-  if (Date.now() - accountCreatedAt(memberId) < MIN_ACCOUNT_AGE_MS) {
-    return reply(
-      "Your Discord account is newer than the minimum age for wiki access " +
-        "(accounts must be at least two years old). This is an anti-abuse rule; " +
-        "talk to the maintainer if you think this is a mistake.",
-    );
+    try {
+      const { assignOgRole } = await import("./verify");
+      await assignOgRole(env.DISCORD_TOKEN, env.GUILD_ID ?? "", env.WIKI_ROLE_ID, memberId);
+    } catch (err) {
+      console.error("[code] role auto-grant failed:", err);
+      return reply("Could not grant the Wiki Member role automatically. Ask the maintainer.");
+    }
   }
   const code = await deriveWikiCode(env.GW_SECRET, memberId);
   const key = "invite:" + code;
@@ -89,4 +82,33 @@ export async function handleCodeInteraction(env: Env, interaction: CodeInteracti
       "It never changes and is linked to your Discord account. Use it with your email at https://gachawiki.info to sign up or to reset your password. Keep it private.\n" +
       "Only you can see this message.",
   );
+}
+
+
+/** Handle the /verify APPLICATION_COMMAND (#wiki-requests): role grant, public reply. */
+export async function handleWikiInteraction(env: Env, interaction: CodeInteraction) {
+  const memberId = interaction.member?.user?.id;
+  const username = interaction.member?.user?.username ?? "member";
+  const roles = interaction.member?.roles ?? [];
+  // Errors stay ephemeral; the confirmation is public (channel activity, nothing to hide).
+  const errReply = (content: string) => ({ type: 4, data: { content, flags: 64 } });
+  const pubReply = (content: string) => ({ type: 4, data: { content } });
+  if (!memberId || !env.GUILD_ID || !env.WIKI_ROLE_ID) {
+    return errReply("The wiki access service is not configured yet. Tell the maintainer.");
+  }
+  const had = roles.includes(env.WIKI_ROLE_ID);
+  if (!had) {
+    try {
+      const { assignOgRole } = await import("./verify");
+      await assignOgRole(env.DISCORD_TOKEN, env.GUILD_ID, env.WIKI_ROLE_ID, memberId);
+    } catch (err) {
+      console.error("[wiki] role grant failed:", err);
+      return errReply("Could not grant the role automatically. Ask the maintainer.");
+    }
+  }
+  const next = "Next: type **/code** in **#wiki-access** to get your personal sign-up code, then sign up at https://gachawiki.info";
+  const zh = "中文: 在 #wiki-access 输入 /code 获取注册码。";
+  const ja = "JA: #wiki-access で /code を入力してください。";
+  const head = `<@${memberId}> ${had ? "already has" : "just became"} a **Wiki Member**! Welcome ${username}`;
+  return pubReply([head, next, zh, ja].join("\n"));
 }

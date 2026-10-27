@@ -14,7 +14,7 @@ import {
   handleVerifyInteraction,
   handleVerifyLink,
 } from "./verify";
-import { handleCodeInteraction } from "./wikicode";
+import { handleCodeInteraction, handleWikiInteraction } from "./wikicode";
 
 export { GatewayDO };
 
@@ -160,12 +160,18 @@ export default {
       // One endpoint, two interaction kinds: MESSAGE_COMPONENT (the #roles
       // pick gate) and APPLICATION_COMMAND (/verify, /check).
       const commandName = ((interaction as { data?: { name?: string } }).data ?? {}).name;
+      if (commandName === "og") (interaction as { data?: { name?: string } }).data!.name = "verify";
       const reply =
         interaction.type === 3
           ? await handleRolePickInteraction(
               env,
               interaction as Parameters<typeof handleRolePickInteraction>[1],
             )
+          : commandName === "verify"
+            ? await handleWikiInteraction(
+                env,
+                interaction as Parameters<typeof handleWikiInteraction>[1],
+              )
           : commandName === "code"
             ? await handleCodeInteraction(
                 env,

@@ -19,8 +19,6 @@ import {
   SWAP_POLL_INTERVAL_MS,
 } from "./config";
 import { fetchLatestBlock } from "./evm";
-import { MIN_ACCOUNT_AGE_MS } from "./wikicode";
-import { assignOgRole } from "./verify";
 import { fetchGwStats, type Stats } from "./dexscreener";
 import { buildStatSlots, presenceForIndex } from "./presence";
 import {
@@ -153,10 +151,6 @@ interface DiscordMessage {
 
 interface GatewayEnv {
   DISCORD_TOKEN: string;
-  /** #og-holder-verify: human messages here get a multilingual redirect reply. */
-  OG_VERIFY_CHANNEL_ID?: string;
-  /** #wiki-requests: old-enough accounts get the Wiki Member role automatically. */
-  WIKI_REQUESTS_CHANNEL_ID?: string;
   /** Wiki Member role id (auto-granted here). */
   WIKI_ROLE_ID?: string;
   /** Discord channel id for the buys/sells feed. Empty = feed disabled. */
@@ -740,14 +734,6 @@ export class GatewayDO implements DurableObject {
     } else if (msg.t === "RESUMED") {
       this.mem.identified = true;
       console.log("[gateway] RESUMED");
-    } else if (msg.t === "MESSAGE_CREATE") {
-      const d = msg.d as {
-        channel_id?: string;
-        author?: { id?: string; bot?: boolean };
-        member?: { roles?: string[] };
-      };
-      await this.onVerifyChannelMessage(d);
-      await this.onWikiRequestMessage(d);
     }
   }
 
@@ -757,111 +743,6 @@ export class GatewayDO implements DurableObject {
    * wiki-access directions in every community language. One reply per user per
    * 10 minutes; bot authors are ignored.
    */
-  /**
-   * Auto-approval in #wiki-requests: Discord accounts older than the minimum
-   * age get the Wiki Member role immediately (with a multilingual how-to);
-   * newer accounts are told to show proof for manual review by the maintainer.
-   */
-  private async onWikiRequestMessage(d: {
-    channel_id?: string;
-    author?: { id?: string; bot?: boolean };
-    member?: { roles?: string[] };
-  }): Promise<void> {
-    const channelId = d?.channel_id;
-    const author = d?.author;
-    if (!channelId || channelId !== this.env.WIKI_REQUESTS_CHANNEL_ID) return;
-    if (!author?.id || author.bot) return;
-    if (!this.env.WIKI_ROLE_ID || !this.env.GUILD_ID) return;
-    const cooldownKey = `wikireply:${author.id}`;
-    const last = await this.state.storage.get<number>(cooldownKey);
-    if (last != null && Date.now() - last < 600_000) return;
-    await this.state.storage.put(cooldownKey, Date.now());
-
-    const ACC = "<#1564572970242805810>";
-    const createdMs = Number(BigInt(author.id) >> 22n) + 1420070400000;
-    const oldEnough = Date.now() - createdMs >= MIN_ACCOUNT_AGE_MS;
-    let content: string;
-    try {
-      if (oldEnough) {
-        if (!(d.member?.roles ?? []).includes(this.env.WIKI_ROLE_ID)) {
-          await assignOgRole(this.env.DISCORD_TOKEN, this.env.GUILD_ID, this.env.WIKI_ROLE_ID, author.id);
-        }
-        content =
-          `<@${author.id}> **Access granted! Your Discord account is old enough.**
-` +
-          `EN: Wiki Member role given. Type **/code** in ${ACC} to get your sign-up code, then sign up at https://gachawiki.info
-` +
-          `中文: 已授予 Wiki Member 身份。在 ${ACC} 输入 **/code** 获取注册码, 然后在 gachawiki.info 注册。
-` +
-          `JA: Wiki Member 権限を付与しました。${ACC} で **/code** と入力してコードを受け取り, gachawiki.info で登録してください。
-` +
-          `KO: Wiki Member 역할이 지급되었습니다. ${ACC} 에서 **/code** 를 입력해 코드를 받으세요. 가입은 gachawiki.info 에서。
-` +
-          `VI: Đã cấp vai trò Wiki Member. Gõ **/code** trong ${ACC} để nhận mã, rồi đăng ký tại gachawiki.info
-` +
-          `TH: ได้รับบทบาท Wiki Member แล้ว พิมพ์ **/code** ใน ${ACC} เพื่อรับรหัสแล้วสมัครที่ gachawiki.info`;
-      } else {
-        content =
-          `<@${author.id}> **Your Discord account is newer than 2 years, so access is not automatic.**
-` +
-          `EN: Show an old gacha game account, or another way to prove you are old enough, and the maintainer will review by hand.
-` +
-          `中文: 请展示较老的抽卡游戏账号或其他证明方式, 管理员会人工审核。
-` +
-          `JA: 古いガチャゲームのアカウントなど年齢を証明できるものを提示してください。管理者が手動で審査します。
-` +
-          `KO: 오래된 가차 게임 계정 등 나이를 증명할 방법을 보여주시면 관리자가 수동으로 검토합니다.
-` +
-          `VI: Hãy cho thấy tài khoản game gacha cũ hoặc cách chứng minh khác, người quản trị sẽ xem xét thủ công.
-` +
-          `TH: โปรดแสดงบัญชีเกม gacha เก่าหรือวิธีพิสูจน์อื่น ๆ ผู้ดูแลจะตรวจสอบด้วยตนเอง`;
-      }
-      const { postChannelMessage } = await import("./discord-rest");
-      await postChannelMessage(this.env.DISCORD_TOKEN, channelId, { content });
-    } catch (err) {
-      console.error("[gateway] wiki-requests auto-reply failed:", err);
-    }
-  }
-
-  private async onVerifyChannelMessage(d: {
-    channel_id?: string;
-    author?: { id?: string; bot?: boolean };
-  }): Promise<void> {
-    const channelId = d?.channel_id;
-    const author = d?.author;
-    if (!channelId || channelId !== this.env.OG_VERIFY_CHANNEL_ID) return;
-    if (!author?.id || author.bot) return;
-    const cooldownKey = `ogreply:${author.id}`;
-    const last = await this.state.storage.get<number>(cooldownKey);
-    if (last != null && Date.now() - last < 600_000) return;
-    await this.state.storage.put(cooldownKey, Date.now());
-    const REQ = "<#1564575899246923817>";
-    const ACC = "<#1564572970242805810>";
-    const content =
-      `<@${author.id}> wrong channel! ` +
-      `This channel is only for OG Holder (NFT) verification.
-` +
-      `**GachaWiki website access:**
-` +
-      `EN: Ask in ${REQ}, then type /code in ${ACC}
-` +
-      `JA: GachaWikiサイトへのアクセスは ${REQ} で申請し、${ACC} で /code と入力してください
-` +
-      `KO: GachaWiki 사이트 접근은 ${REQ} 에서 신청하고, ${ACC} 에서 /code 를 입력하세요
-` +
-      `中文: 如需访问 GachaWiki 网站, 请在 ${REQ} 申请, 然后在 ${ACC} 输入 /code
-` +
-      `VI: Để truy cập GachaWiki, hãy yêu cầu tại ${REQ}, sau đó gõ /code trong ${ACC}
-` +
-      `TH: หากต้องการเข้าถึง GachaWiki โปรดขอที่ ${REQ} แล้วพิมพ์ /code ใน ${ACC}`;
-    try {
-      const { postChannelMessage } = await import("./discord-rest");
-      await postChannelMessage(this.env.DISCORD_TOKEN, channelId, { content });
-    } catch (err) {
-      console.error("[gateway] verify-channel reply failed:", err);
-    }
-  }
-
   private async onInvalidSession(canResume: boolean): Promise<void> {
     if (!canResume) {
       // Discord says our session is invalid — discard it and re-IDENTIFY fresh.
