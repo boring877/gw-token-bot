@@ -9,6 +9,15 @@ import type { Env } from "./index";
 
 const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
+/** Minimum Discord account age for wiki access (anti-abuse rule). */
+const MIN_ACCOUNT_AGE_MS = 2 * 366 * 24 * 60 * 60 * 1000;
+/** Discord epoch (2015-01-01) — snowflake IDs encode creation time in the top 42 bits. */
+const DISCORD_EPOCH_MS = 1420070400000;
+
+function accountCreatedAt(id: string): number {
+  return Number(BigInt(id) >> 22n) + DISCORD_EPOCH_MS;
+}
+
 async function hmacHex(secret: string, data: string): Promise<string> {
   const key = await crypto.subtle.importKey(
     "raw",
@@ -52,6 +61,13 @@ export async function handleCodeInteraction(env: Env, interaction: CodeInteracti
   }
   if (!roles.includes(env.WIKI_ROLE_ID)) {
     return reply("You need the **Wiki Member** role first. Ask the maintainer for it.");
+  }
+  if (Date.now() - accountCreatedAt(memberId) < MIN_ACCOUNT_AGE_MS) {
+    return reply(
+      "Your Discord account is newer than the minimum age for wiki access " +
+        "(accounts must be at least two years old). This is an anti-abuse rule; " +
+        "talk to the maintainer if you think this is a mistake.",
+    );
   }
   const code = await deriveWikiCode(env.GW_SECRET, memberId);
   const key = "invite:" + code;
